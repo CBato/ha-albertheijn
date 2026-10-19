@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS prices (
     price_before_bonus REAL,
     bonus TEXT,
     unit_price TEXT,
+    effective REAL,                 -- price per item when buying the bonus quantity (1+1 gratis: half)
     PRIMARY KEY (product_id, date)
 );
 CREATE TABLE IF NOT EXISTS suggestions (
@@ -78,6 +79,10 @@ def init(path: str) -> None:
     with closing(_connect(path)) as con, con:
         con.execute("PRAGMA journal_mode = WAL")
         con.executescript(SCHEMA)
+        # columns added in later versions
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(prices)")}
+        if "effective" not in cols:
+            con.execute("ALTER TABLE prices ADD COLUMN effective REAL")
 
 
 def get_meta(path: str) -> dict[str, str]:
@@ -173,14 +178,15 @@ def save_catalog(path: str, products: list[dict[str, Any]], now: str) -> None:
 def save_prices(path: str, day: str, rows: list[dict[str, Any]]) -> int:
     with closing(_connect(path)) as con, con:
         data = [
-            (r["product_id"], day, r.get("price"), r.get("price_before_bonus"), r.get("bonus"), r.get("unit_price"))
+            (r["product_id"], day, r.get("price"), r.get("price_before_bonus"), r.get("bonus"), r.get("unit_price"),
+             r.get("effective", r.get("price")))
             for r in rows
             if r.get("product_id") and r.get("price") is not None
         ]
         con.executemany(
-            """INSERT INTO prices(product_id, date, price, price_before_bonus, bonus, unit_price) VALUES(?, ?, ?, ?, ?, ?)
+            """INSERT INTO prices(product_id, date, price, price_before_bonus, bonus, unit_price, effective) VALUES(?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(product_id, date) DO UPDATE SET price = excluded.price, price_before_bonus = excluded.price_before_bonus,
-                 bonus = excluded.bonus, unit_price = excluded.unit_price""",
+                 bonus = excluded.bonus, unit_price = excluded.unit_price, effective = excluded.effective""",
             data,
         )
         return len(data)
@@ -222,9 +228,9 @@ def price_history(path: str, product_id: int) -> list[dict[str, Any]]:
     """Weekly prices and the prices paid in delivered orders, oldest first."""
     with closing(_connect(path)) as con:
         weekly = [
-            {"d": r["date"], "p": r["price"], "b": r["price_before_bonus"], "bonus": r["bonus"], "u": r["unit_price"]}
+            {"d": r["date"], "p": r["price"], "b": r["price_before_bonus"], "bonus": r["bonus"], "u": r["unit_price"], "e": r["effective"]}
             for r in con.execute(
-                "SELECT date, price, price_before_bonus, bonus, unit_price FROM prices WHERE product_id = ? ORDER BY date",
+                "SELECT date, price, price_before_bonus, bonus, unit_price, effective FROM prices WHERE product_id = ? ORDER BY date",
                 (product_id,),
             )
         ]

@@ -18,7 +18,7 @@ from homeassistant.helpers.storage import Store
 
 from . import db
 from .api import AlbertHeijnApi, AlbertHeijnApiError, Fulfillment
-from .suggest import REGULAR_DAYS, compute_suggestions, week_start
+from .suggest import REGULAR_DAYS, compute_suggestions, effective_price, week_start
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,13 +48,16 @@ def _older_than(stamp: str | None, days: int) -> bool:
         return True
 
 
-def compute_frequent(snapshot: dict[str, Any], today: date | None = None) -> list[dict[str, Any]]:
+def compute_frequent(snapshot: dict[str, Any], today: date | None = None, horizon_days: int = 7) -> list[dict[str, Any]]:
     """Products sorted by how often (and how recently) they were delivered, with their order rhythm,
     followed by the rest of "Eerder gekocht".
 
     Per product: count (orders), quantity (total), usual_qty (median per order), every_weeks (median gap),
     share (part of the orders since it was first ordered), per_week (average quantity per week),
-    days_since, due (it's about time again), and the latest weekly price.
+    days_since, due, and the latest weekly price.
+
+    due = the stock from the last purchase (last quantity / use per week) runs out within horizon_days
+    (normally: until the delivery after the next one). So 4 pakken in de bonus last twice as long as 2.
     """
     today = today or date.today()
     order_days = [date.fromisoformat(d) for d in snapshot["order_days"]]
@@ -90,6 +93,8 @@ def compute_frequent(snapshot: dict[str, Any], today: date | None = None) -> lis
         gaps = [(b - a).days for a, b in zip(days, days[1:])]
         gap = median(gaps) if gaps else None
         weeks = max(1.0, ((latest - first).days / 7) + 1)
+        per_week = s["quantity"] / weeks
+        covers = qtys[-1] / per_week * 7 if per_week else None  # days the last purchase lasts
         s.update({
             "first": first.isoformat(), "last": last.isoformat(),
             "days_since": (today - last).days,
@@ -97,8 +102,9 @@ def compute_frequent(snapshot: dict[str, Any], today: date | None = None) -> lis
             "every_weeks": max(1, round(gap / 7)) if gap else None,
             "interval_days": round(gap) if gap else None,
             "share": round(s["count"] / since_first, 2) if since_first else None,
-            "per_week": round(s["quantity"] / weeks, 1),
-            "due": bool(gap) and (today - last).days >= gap,
+            "per_week": round(per_week, 1),
+            "covers_days": round(covers) if covers else None,
+            "due": len(days) >= 2 and covers is not None and covers < (today - last).days + horizon_days,
             "score": round(s["score"], 2),
         })
         if p := prices.get(s["product_id"]):
@@ -132,6 +138,7 @@ class OrderHistory:
         self.closed_supported: bool | None = None
         self.last_error: str | None = None
         self.suggestions: list[dict[str, Any]] = []
+        self.next_delivery: str | None = None  # set by the coordinator
 
     async def _run(self, func, *args):
         return await self._hass.async_add_executor_job(func, self._path, *args)
@@ -164,7 +171,7 @@ class OrderHistory:
 
     async def _refresh_cache(self) -> None:
         snap = await self._run(db.load_for_frequent)
-        self._frequent = await self._hass.async_add_executor_job(compute_frequent, snap)
+        self._frequent = await self._hass.async_add_executor_job(compute_frequent, snap, None, self.horizon_days())
         days = snap["order_days"]
         self.summary = {
             "orders": len(days),
@@ -178,6 +185,14 @@ class OrderHistory:
             "prices_at": self.meta.get("prices_at"),
             "catalog_at": self.meta.get("catalog_at"),
         }
+
+    def horizon_days(self) -> int:
+        """Days ahead a product must last: until the delivery after the next one."""
+        try:
+            until = (date.fromisoformat(self.next_delivery or "") - date.today()).days
+        except ValueError:
+            until = 7
+        return max(0, until) + 7
 
     def frequent(self, limit: int = 100, include_catalog: bool = True) -> list[dict[str, Any]]:
         rows = self._frequent if include_catalog else [p for p in self._frequent if p["count"]]
@@ -201,6 +216,7 @@ class OrderHistory:
         # bonus information must be from this bonus week
         if (self.meta.get("prices_at") or "")[:10] < week_start(today).isoformat():
             await self.async_sync(open_orders, refresh_prices=True)
+        await self._refresh_cache()  # "due" depends on today and the next delivery
         on_list = {i["product_id"] for i in await self._api.get_shopping_list() if i.get("product_id")}
         before = {s["product_id"] for s in await self._run(db.get_suggestions, week)}
         frequent = [p for p in self._frequent if p.get("count")]
@@ -312,6 +328,8 @@ class OrderHistory:
             except AlbertHeijnApiError as err:
                 _LOGGER.debug("Price check failed: %s", err)
                 return got, str(err)
+            for r in rows:
+                r["effective"] = effective_price(r.get("bonus"), r.get("price"), r.get("price_before_bonus"))
             got += await self._run(db.save_prices, today, rows)
             await asyncio.sleep(REQUEST_PAUSE)
         return got, None

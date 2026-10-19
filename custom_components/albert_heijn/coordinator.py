@@ -114,6 +114,9 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
                 except AlbertHeijnApiError as err:
                     _LOGGER.debug("Could not fetch next order items: %s", err)
 
+        if self.history:
+            self.history.next_delivery = data.next_order.delivery_slot.date if data.next_order else None
+
         # An open order disappeared (delivered): pick it up in the order history
         open_ids = {f.order_id for f in fulfillments}
         if self._open_ids is not None and self._open_ids - open_ids and self.history:
