@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 
@@ -440,7 +441,7 @@ class AlbertHeijnApi:
         """Search for products."""
         data = await self._request(
             "GET",
-            f"/mobile-services/product/search/v2?query={query}&page=0&size={limit}&sortOn=RELEVANCE",
+            f"/mobile-services/product/search/v2?query={quote(query)}&page=0&size={int(limit)}&sortOn=RELEVANCE",
         )
 
         return [_product_from_raw(p) for p in data.get("products", []) if p.get("webshopId")]
