@@ -101,18 +101,13 @@ class AddToOrderIntentHandler(intent.IntentHandler):
         coordinator = _get_coordinator(intent_obj.hass)
 
         try:
-            summary = await coordinator.api.get_active_order_summary()
-            order_id = summary["id"] if summary else None
-            await coordinator.api.add_to_order(
+            await coordinator.async_put_order_items(
                 [{"productId": product_id, "quantity": quantity}],
-                order_id=order_id,
             )
         except AlbertHeijnApiError as err:
             raise intent.IntentHandleError(
                 f"Kon product {product_id} niet toevoegen: {err}"
             ) from err
-
-        await coordinator.async_request_refresh()
 
         response = intent_obj.create_response()
         response.async_set_speech(
@@ -189,18 +184,13 @@ class RemoveFromOrderIntentHandler(intent.IntentHandler):
         coordinator = _get_coordinator(intent_obj.hass)
 
         try:
-            summary = await coordinator.api.get_active_order_summary()
-            order_id = summary["id"] if summary else None
-            await coordinator.api.add_to_order(
+            await coordinator.async_put_order_items(
                 [{"productId": product_id, "quantity": 0}],
-                order_id=order_id,
             )
         except AlbertHeijnApiError as err:
             raise intent.IntentHandleError(
                 f"Kon product {product_id} niet verwijderen: {err}"
             ) from err
-
-        await coordinator.async_request_refresh()
 
         response = intent_obj.create_response()
         response.async_set_speech(

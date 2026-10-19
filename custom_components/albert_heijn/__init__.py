@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 import logging
 from pathlib import Path
 import shutil
@@ -9,9 +10,11 @@ import shutil
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
 from .const import DOMAIN
 from .coordinator import AlbertHeijnCoordinator
+from .history import OrderHistory
 from .intents import async_setup_intents
 from .services import async_setup_services, async_unload_services
 
@@ -31,7 +34,16 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Albert Heijn from a config entry."""
     coordinator = AlbertHeijnCoordinator(hass, entry)
+    coordinator.history = OrderHistory(hass, coordinator.api, entry.entry_id)
+    await coordinator.history.async_load()
     await coordinator.async_config_entry_first_refresh()
+
+    # Order history: shortly after start, then once a day (and when an order is delivered, see coordinator)
+    async def _sync(_now=None) -> None:
+        await coordinator.async_sync_history()
+
+    entry.async_on_unload(async_call_later(hass, 90, _sync))
+    entry.async_on_unload(async_track_time_interval(hass, _sync, timedelta(hours=24)))
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 

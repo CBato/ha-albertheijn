@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -23,6 +24,9 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
 )
+
+if TYPE_CHECKING:
+    from .history import OrderHistory
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +51,8 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
             access_token=entry.data[CONF_ACCESS_TOKEN],
             refresh_token=entry.data[CONF_REFRESH_TOKEN],
         )
+        self.history: OrderHistory | None = None
+        self._open_ids: set[int] | None = None
 
     async def _async_update_data(self) -> AlbertHeijnData:
         """Fetch data from the API."""
@@ -101,10 +107,71 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
                         "Could not fetch order value limits: %s", err
                     )
 
+            # Products in the next order (for "already in your order" in dashboards)
+            if data.order_details and data.order_details.total_items:
+                try:
+                    data.next_order_items = await self.api.get_order_items(next_order.order_id)
+                except AlbertHeijnApiError as err:
+                    _LOGGER.debug("Could not fetch next order items: %s", err)
+
+        # An open order disappeared (delivered): pick it up in the order history
+        open_ids = {f.order_id for f in fulfillments}
+        if self._open_ids is not None and self._open_ids - open_ids and self.history:
+            self.config_entry.async_create_background_task(
+                self.hass, self.async_sync_history(), "albert_heijn_history_sync"
+            )
+        self._open_ids = open_ids
+
         # Persist refreshed tokens
         self._update_tokens()
 
         return data
+
+    async def async_put_order_items(
+        self, items: list[dict], order_id: int | None = None
+    ) -> dict:
+        """Put products in an order (quantity 0 removes them).
+
+        Without order_id: the active order, else the next order that can still be changed.
+        A submitted order is reopened first; it then has to be confirmed again in the AH app.
+        """
+        reopened = False
+        if not order_id:
+            summary = await self.api.get_active_order_summary()
+            order_id = summary.get("id") if summary else None
+        if not order_id:
+            next_order = self.data.next_order if self.data else None
+            if not next_order or not next_order.modifiable:
+                raise AlbertHeijnApiError("There is no order that can still be changed")
+            order_id = next_order.order_id
+        try:
+            await self.api.add_to_order(items, order_id=order_id)
+        except AlbertHeijnAuthError:
+            raise
+        except AlbertHeijnApiError as err:
+            if "failed: 4" not in str(err):
+                raise
+            # submitted order: reopen it and try once more
+            await self.api.reopen_order(order_id)
+            reopened = True
+            await self.api.add_to_order(items, order_id=order_id)
+        self._update_tokens()
+        await self.async_request_refresh()
+        return {"order_id": order_id, "reopened": reopened}
+
+    async def async_sync_history(self, refresh_catalog: bool = False) -> bool:
+        """Update the stored order history and notify the sensors."""
+        if not self.history:
+            return False
+        open_orders = self.data.fulfillments if self.data else []
+        try:
+            changed = await self.history.async_sync(open_orders, refresh_catalog)
+        except AlbertHeijnAuthError:
+            _LOGGER.warning("Albert Heijn: order history sync needs a new login")
+            return False
+        self._update_tokens()
+        self.async_update_listeners()
+        return changed
 
     def _update_tokens(self) -> None:
         """Update stored tokens if they changed."""

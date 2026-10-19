@@ -44,6 +44,7 @@ async def async_setup_entry(
         AHOrderSubmittableSensor(coordinator),
         AHOpenOrderCountSensor(coordinator),
         AHOrderSpendingSensor(coordinator),
+        AHFrequentlyOrderedSensor(coordinator),
     ]
 
     async_add_entities(entities)
@@ -269,6 +270,8 @@ class AHNextOrderItemCountSensor(AHBaseSensor):
         """Initialize."""
         super().__init__(coordinator, "next_order_item_count")
 
+    _unrecorded_attributes = frozenset({"products"})
+
     @property
     def native_value(self) -> int | None:
         """Return the item count."""
@@ -276,6 +279,18 @@ class AHNextOrderItemCountSensor(AHBaseSensor):
         if data.order_details:
             return data.order_details.total_items
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the products in the next order."""
+        data: AlbertHeijnData = self.coordinator.data
+        return {
+            "order_id": data.next_order.order_id if data.next_order else None,
+            "products": [
+                {"product_id": i.product_id, "title": i.title, "quantity": i.quantity}
+                for i in data.next_order_items
+            ],
+        }
 
 
 class AHMinimumOrderValueSensor(AHBaseSensor):
@@ -415,3 +430,49 @@ class AHOrderSpendingSensor(AHBaseSensor):
             [f for f in data.fulfillments if f.total_price > 0]
         )
         return attrs
+
+
+class AHFrequentlyOrderedSensor(AHBaseSensor):
+    """Products ordered most often, from the locally stored order history."""
+
+    _attr_name = "Vaak besteld"
+    _attr_icon = "mdi:cart-heart"
+    _attr_native_unit_of_measurement = "producten"
+    _unrecorded_attributes = frozenset({"top"})
+
+    TOP = 25
+
+    def __init__(self, coordinator: AlbertHeijnCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "frequently_ordered")
+
+    @property
+    def native_value(self) -> int | None:
+        """Number of different products in the delivered orders."""
+        history = self.coordinator.history
+        if not history:
+            return None
+        return len({i.get("product_id") for o in history.delivered() for i in o.get("items", [])})
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Top products and the state of the history."""
+        history = self.coordinator.history
+        if not history:
+            return {}
+        delivered = history.delivered()
+        dates = sorted(o.get("date", "") for o in delivered if o.get("date"))
+        top = [
+            {k: p.get(k) for k in ("product_id", "title", "count", "last", "interval_days", "image_url")}
+            for p in history.frequent(self.TOP, include_catalog=False)
+        ]
+        return {
+            "orders": len(delivered),
+            "first_order": dates[0] if dates else None,
+            "last_order": dates[-1] if dates else None,
+            "catalog": len(history.data.get("catalog") or []),
+            "closed_orders_supported": history.closed_supported,
+            "synced_at": history.data.get("synced_at"),
+            "last_error": history.last_error,
+            "top": top,
+        }

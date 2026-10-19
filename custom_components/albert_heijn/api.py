@@ -106,6 +106,8 @@ class OrderItem:
     quantity: int
     price: float
     unit_size: str
+    category: str = ""
+    image_url: str | None = None
 
 
 @dataclass
@@ -117,6 +119,31 @@ class AlbertHeijnData:
     order_details: OrderDetails | None = None
     order_value_limits: OrderValueLimits | None = None
     all_order_details: dict[int, OrderDetails] = field(default_factory=dict)
+    next_order_items: list[OrderItem] = field(default_factory=list)
+
+
+def _image_url(p: dict[str, Any]) -> str | None:
+    """Pick a small product image (around 200px) from an AH product dict."""
+    images = [i for i in p.get("images") or [] if isinstance(i, dict) and i.get("url")]
+    if not images:
+        return None
+    sized = [i for i in images if i.get("width")]
+    if sized:
+        return min(sized, key=lambda i: abs(int(i["width"]) - 200))["url"]
+    return images[0]["url"]
+
+
+def _product_from_raw(p: dict[str, Any]) -> Product:
+    """Product from the product dict that the AH REST endpoints return."""
+    return Product(
+        id=p.get("webshopId") or p.get("id") or 0,
+        title=p.get("title", ""),
+        brand=p.get("brand", ""),
+        price=p.get("currentPrice") or p.get("priceBeforeBonus") or 0,
+        unit_size=p.get("salesUnitSize", ""),
+        is_orderable=p.get("isOrderable", False),
+        image_url=_image_url(p),
+    )
 
 
 class AlbertHeijnApiError(Exception):
@@ -247,6 +274,26 @@ class AlbertHeijnApi:
         self._access_token = data["access_token"]
         self._refresh_token = data["refresh_token"]
 
+    async def get_closed_fulfillments(self) -> list[tuple[int, str]]:
+        """Get delivered (closed) orders as (order_id, delivery date).
+
+        Not documented by AH; raises AlbertHeijnApiError if the status does not exist.
+        """
+        query = """query OrderFulfillmentsClosed {
+  orderFulfillments(status: CLOSED) {
+    result {
+      orderId
+      delivery { slot { date } }
+    }
+  }
+}"""
+        data = await self._graphql(query)
+        return [
+            (r["orderId"], ((r.get("delivery") or {}).get("slot") or {}).get("date", ""))
+            for r in (data.get("orderFulfillments") or {}).get("result") or []
+            if r.get("orderId")
+        ]
+
     async def get_fulfillments(self) -> list[Fulfillment]:
         """Get all open order fulfillments."""
         query = """query OrderFulfillments {
@@ -349,6 +396,7 @@ class AlbertHeijnApi:
 
         items: list[OrderItem] = []
         for group in data.get("groupedProductsInTaxonomy", []):
+            category = group.get("taxonomyName") or group.get("name") or group.get("title") or ""
             for op in group.get("orderedProducts", []):
                 product = op.get("product", {})
                 items.append(
@@ -359,6 +407,8 @@ class AlbertHeijnApi:
                         quantity=op.get("quantity", 1),
                         price=product.get("currentPrice") or product.get("priceBeforeBonus", 0),
                         unit_size=product.get("salesUnitSize", ""),
+                        category=category,
+                        image_url=_image_url(product),
                     )
                 )
         return items
@@ -387,26 +437,57 @@ class AlbertHeijnApi:
             f"/mobile-services/product/search/v2?query={query}&page=0&size={limit}&sortOn=RELEVANCE",
         )
 
-        products = []
-        for p in data.get("products", []):
-            image_url = None
-            images = p.get("images", [])
-            if images:
-                image_url = images[0].get("url")
+        return [_product_from_raw(p) for p in data.get("products", []) if p.get("webshopId")]
 
-            products.append(
-                Product(
-                    id=p["webshopId"],
-                    title=p.get("title", ""),
-                    brand=p.get("brand", ""),
-                    price=p.get("currentPrice") or p.get("priceBeforeBonus") or 0,
-                    unit_size=p.get("salesUnitSize", ""),
-                    is_orderable=p.get("isOrderable", False),
-                    image_url=image_url,
-                )
+    async def lookup_gtin(self, code: str) -> Product | None:
+        """Find the AH product for a barcode (EAN-8/13, UPC-A, GTIN-14). None if AH doesn't sell it."""
+        digits = "".join(ch for ch in str(code) if ch.isdigit())
+        if len(digits) not in (8, 12, 13, 14):
+            raise AlbertHeijnApiError(f"Invalid barcode: {code}")
+        try:
+            data = await self._request("GET", f"/mobile-services/product/search/v1/gtin/{digits}")
+        except AlbertHeijnApiError as err:
+            if "failed: 404" in str(err):
+                return None
+            raise
+        if not isinstance(data, dict):
+            return None
+        product = _product_from_raw(data)
+        return product if product.id else None
+
+    async def get_previously_bought(
+        self, size: int = 100, page: int = 0
+    ) -> tuple[list[dict[str, Any]], int]:
+        """AH's own "Eerder gekocht" list (undocumented GraphQL). Returns (products, total pages)."""
+        rich = "id title brand category salesUnitSize images { url width }"
+        basic = "id title brand category"
+        last_err: AlbertHeijnApiError | None = None
+        for fields in (rich, basic):
+            query = (
+                '{ productSearch(input: { query: "" previouslyBought: true '
+                f"size: {int(size)} page: {int(page)} }}) "
+                f"{{ products {{ {fields} }} page {{ totalElements totalPages }} }} }}"
             )
-
-        return products
+            try:
+                data = await self._graphql(query)
+            except AlbertHeijnApiError as err:
+                last_err = err
+                continue
+            search = (data or {}).get("productSearch") or {}
+            products = [
+                {
+                    "product_id": p.get("id"),
+                    "title": p.get("title", ""),
+                    "brand": p.get("brand", ""),
+                    "category": p.get("category", ""),
+                    "unit_size": p.get("salesUnitSize", ""),
+                    "image_url": _image_url(p),
+                }
+                for p in search.get("products") or []
+                if p.get("id")
+            ]
+            return products, int((search.get("page") or {}).get("totalPages") or 0)
+        raise last_err or AlbertHeijnApiError("previously bought failed")
 
     async def add_to_order(self, items: list[dict[str, Any]], order_id: int | None = None) -> None:
         """Add items to an order.

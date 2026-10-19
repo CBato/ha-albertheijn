@@ -22,12 +22,14 @@ search_products:
 
 add_to_order:
   name: Add to Order
-  description: Add a product to the current active order by product ID.
+  description: >-
+    Put products in the next order that can still be changed. A submitted order is reopened first;
+    confirm the change in the AH app afterwards.
   fields:
     product_id:
       name: Product ID
-      description: The webshop product ID to add.
-      required: true
+      description: The webshop product ID to add (or use products for several at once).
+      required: false
       example: 553353
       selector:
         number:
@@ -43,6 +45,21 @@ add_to_order:
         number:
           min: 0
           max: 99
+    products:
+      name: Products
+      description: "Several products at once, e.g. [{product_id: 54074, quantity: 2}]."
+      required: false
+      example: "[{product_id: 54074, quantity: 2}]"
+      selector:
+        object:
+    order_id:
+      name: Order ID
+      description: Order to change; default the active order, else the next one that can be changed.
+      required: false
+      selector:
+        number:
+          min: 1
+          mode: box
 
 reopen_order:
   name: Reopen Order
@@ -85,3 +102,51 @@ revert_order:
         number:
           min: 1
           mode: box
+
+lookup_barcode:
+  name: Look up barcode
+  description: Find the AH product for a barcode (EAN-13, EAN-8, UPC-A). Returns an empty list if AH doesn't sell it.
+  fields:
+    barcode:
+      name: Barcode
+      description: The digits under the barcode.
+      required: true
+      example: "8710400000000"
+      selector:
+        text:
+
+get_frequent_items:
+  name: Get frequently ordered products
+  description: >-
+    Products from the stored order history, most often (and recently) ordered first,
+    followed by the rest of AH's "Eerder gekocht" list.
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of products.
+      required: false
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 1000
+          mode: box
+    include_catalog:
+      name: Include "Eerder gekocht"
+      description: Also return products that were never delivered but are in AH's "Eerder gekocht".
+      required: false
+      default: true
+      selector:
+        boolean:
+
+sync_history:
+  name: Sync order history
+  description: Fetch new delivered orders now (normally once a day and after each delivery).
+  fields:
+    refresh_catalog:
+      name: Refresh "Eerder gekocht"
+      description: Also fetch AH's "Eerder gekocht" list again.
+      required: false
+      default: false
+      selector:
+        boolean:
