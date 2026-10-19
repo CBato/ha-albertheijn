@@ -7,6 +7,7 @@ One small file next to the HA config: /config/albert_heijn.db (included in HA ba
 from __future__ import annotations
 
 from contextlib import closing
+import json
 import sqlite3
 from typing import Any
 
@@ -49,6 +50,17 @@ CREATE TABLE IF NOT EXISTS prices (
     bonus TEXT,
     unit_price TEXT,
     PRIMARY KEY (product_id, date)
+);
+CREATE TABLE IF NOT EXISTS suggestions (
+    week TEXT NOT NULL,             -- delivery date (or Monday) the suggestion was made for
+    product_id INTEGER NOT NULL,
+    title TEXT,
+    quantity INTEGER,
+    kinds TEXT,                     -- 'ritme', 'bonus' (comma separated)
+    reasons TEXT,                   -- JSON list of reasons in plain Dutch
+    bonus_check TEXT,               -- 'echt', 'let_op', 'onbekend' or NULL
+    added_at TEXT,
+    PRIMARY KEY (week, product_id)
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_product ON order_items(product_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status_date ON orders(status, date);
@@ -225,3 +237,48 @@ def price_history(path: str, product_id: int) -> list[dict[str, Any]]:
             )
         ]
     return sorted(weekly + paid, key=lambda x: x.get("d") or "")
+
+
+def price_series(path: str, product_ids: list[int], since: str) -> dict[int, list[dict[str, Any]]]:
+    """Weekly prices since a date for several products (oldest first)."""
+    out: dict[int, list[dict[str, Any]]] = {}
+    if not product_ids:
+        return out
+    with closing(_connect(path)) as con:
+        for i in range(0, len(product_ids), 500):
+            chunk = product_ids[i : i + 500]
+            marks = ",".join("?" * len(chunk))
+            for r in con.execute(
+                f"""SELECT product_id, date, price, price_before_bonus, bonus FROM prices
+                    WHERE date >= ? AND product_id IN ({marks}) ORDER BY product_id, date""",
+                (since, *chunk),
+            ):
+                out.setdefault(r["product_id"], []).append(
+                    {"d": r["date"], "p": r["price"], "b": r["price_before_bonus"], "bonus": r["bonus"]}
+                )
+    return out
+
+
+def save_suggestions(path: str, week: str, rows: list[dict[str, Any]], now: str) -> None:
+    with closing(_connect(path)) as con, con:
+        con.executemany(
+            """INSERT INTO suggestions(week, product_id, title, quantity, kinds, reasons, bonus_check, added_at)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(week, product_id) DO NOTHING""",
+            [
+                (week, r["product_id"], r.get("title"), r.get("quantity"), ",".join(r.get("kinds") or []),
+                 json.dumps(r.get("reasons") or [], ensure_ascii=False), r.get("bonus_check"), now)
+                for r in rows
+            ],
+        )
+
+
+def get_suggestions(path: str, week: str) -> list[dict[str, Any]]:
+    with closing(_connect(path)) as con:
+        return [
+            {
+                "product_id": r["product_id"], "title": r["title"], "quantity": r["quantity"],
+                "kinds": [k for k in (r["kinds"] or "").split(",") if k], "reasons": json.loads(r["reasons"] or "[]"),
+                "bonus_check": r["bonus_check"], "added_at": r["added_at"],
+            }
+            for r in con.execute("SELECT * FROM suggestions WHERE week = ? ORDER BY added_at, rowid", (week,))
+        ]

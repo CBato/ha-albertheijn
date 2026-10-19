@@ -164,3 +164,41 @@ get_price_history:
         number:
           min: 1
           mode: box
+
+fill_list:
+  name: Fill the shopping list
+  description: >-
+    Put this week's suggestions on the AH shopping list (in the AH app also the basket): products that are due
+    according to the order rhythm, and regularly bought products that are in a real bonus. Skips what is already
+    on the list, in the order, or was suggested before this week. The reasons are kept (sensor "Voorstellen").
+  fields:
+    dry_run:
+      name: Dry run
+      description: Only return the suggestions, don't change the list.
+      default: false
+      selector:
+        boolean:
+    min_count:
+      name: Minimum orders
+      description: A product must have been ordered at least this many times.
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 50
+    min_share:
+      name: Minimum share
+      description: Part of the orders (since it was first ordered) a product must have been in, 0 to 1.
+      default: 0.3
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.05
+    max_items:
+      name: Maximum products
+      default: 25
+      selector:
+        number:
+          min: 1
+          max: 100

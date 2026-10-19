@@ -159,6 +159,22 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
         await self.async_request_refresh()
         return {"order_id": order_id, "reopened": reopened}
 
+    async def async_fill_list(self, **options) -> dict:
+        """Put this week's suggestions on the AH shopping list (see history.async_fill_list)."""
+        if not self.history:
+            raise AlbertHeijnApiError("Order history not available")
+        data = self.data
+        in_order = {i.product_id for i in data.next_order_items} if data else set()
+        week = data.next_order.delivery_slot.date if data and data.next_order else ""
+        if not week:
+            from datetime import date as _date, timedelta as _td
+            today = _date.today()
+            week = (today - _td(days=today.weekday())).isoformat()
+        result = await self.history.async_fill_list(data.fulfillments if data else [], in_order, week, **options)
+        self._update_tokens()
+        self.async_update_listeners()
+        return result
+
     async def async_sync_history(self, refresh_catalog: bool = False) -> bool:
         """Update the stored order history and notify the sensors."""
         if not self.history:

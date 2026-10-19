@@ -26,6 +26,7 @@ SERVICE_LOOKUP_BARCODE = "lookup_barcode"
 SERVICE_GET_FREQUENT_ITEMS = "get_frequent_items"
 SERVICE_SYNC_HISTORY = "sync_history"
 SERVICE_GET_PRICE_HISTORY = "get_price_history"
+SERVICE_FILL_LIST = "fill_list"
 
 ATTR_QUERY = "query"
 ATTR_PRODUCT_ID = "product_id"
@@ -89,6 +90,15 @@ GET_FREQUENT_ITEMS_SCHEMA = vol.Schema(
             vol.Coerce(int), vol.Range(min=1, max=1000)
         ),
         vol.Optional(ATTR_INCLUDE_CATALOG, default=True): cv.boolean,
+    }
+)
+
+FILL_LIST_SCHEMA = vol.Schema(
+    {
+        vol.Optional("dry_run", default=False): cv.boolean,
+        vol.Optional("min_count", default=3): vol.All(vol.Coerce(int), vol.Range(min=1, max=50)),
+        vol.Optional("min_share", default=0.3): vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
+        vol.Optional("max_items", default=25): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
     }
 )
 
@@ -194,6 +204,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             "products": history.frequent(call.data[ATTR_LIMIT], call.data[ATTR_INCLUDE_CATALOG]),
         }
 
+    async def handle_fill_list(call: ServiceCall) -> ServiceResponse:
+        """Put this week's suggestions (order rhythm + bonus) on the AH shopping list."""
+        coordinator = _get_coordinator(hass)
+        try:
+            return await coordinator.async_fill_list(**call.data)
+        except AlbertHeijnApiError as err:
+            raise HomeAssistantError(f"Failed to fill the list: {err}") from err
+
     async def handle_get_price_history(call: ServiceCall) -> ServiceResponse:
         """Weekly prices and paid prices of one product."""
         coordinator = _get_coordinator(hass)
@@ -268,6 +286,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_FILL_LIST,
+        handle_fill_list,
+        schema=FILL_LIST_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_GET_PRICE_HISTORY,
         handle_get_price_history,
         schema=PRICE_HISTORY_SCHEMA,
@@ -295,5 +321,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_GET_FREQUENT_ITEMS,
         SERVICE_SYNC_HISTORY,
         SERVICE_GET_PRICE_HISTORY,
+        SERVICE_FILL_LIST,
     ):
         hass.services.async_remove(DOMAIN, service)

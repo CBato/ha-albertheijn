@@ -4,7 +4,7 @@
 
 A Home Assistant custom integration for Albert Heijn grocery delivery, providing order tracking sensors and voice control through Assist.
 
-## This fork (CBato, 0.8.0)
+## This fork (CBato, 0.9.0)
 
 Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) with:
 
@@ -17,6 +17,10 @@ Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) wi
   (count, last ordered, average interval) as attribute.
 - **`albert_heijn.get_frequent_items`** — up to 1000 products, most often and recently ordered first,
   followed by the rest of "Eerder gekocht".
+- **`albert_heijn.fill_list`** — puts this week's suggestions on the AH shopping list (= the basket in the AH app)
+  with the usual quantity: products due according to the order rhythm, and regularly bought products in a bonus
+  that is a real discount (the price before the bonus is compared with the normal price of the last 90 days).
+  `sensor.albert_heijn_voorstellen` lists what was added this week and why. `dry_run: true` only shows them.
 - **`albert_heijn.sync_history`** — sync now; reports whether AH supports closed orders.
 - **`albert_heijn.lookup_barcode`** — barcode (EAN) → AH product.
 - **`albert_heijn.add_to_order`** — also works for a submitted (planned) order: it is reopened first and has to be

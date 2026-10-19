@@ -45,6 +45,7 @@ async def async_setup_entry(
         AHOpenOrderCountSensor(coordinator),
         AHOrderSpendingSensor(coordinator),
         AHFrequentlyOrderedSensor(coordinator),
+        AHSuggestionsSensor(coordinator),
     ]
 
     async_add_entities(entities)
@@ -471,3 +472,28 @@ class AHFrequentlyOrderedSensor(AHBaseSensor):
             "last_error": history.last_error,
             "top": top,
         }
+
+
+class AHSuggestionsSensor(AHBaseSensor):
+    """What was put on the shopping list automatically this week, and why."""
+
+    _attr_name = "Voorstellen"
+    _attr_icon = "mdi:auto-fix"
+    _attr_native_unit_of_measurement = "producten"
+    _unrecorded_attributes = frozenset({"items"})
+
+    def __init__(self, coordinator: AlbertHeijnCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "suggestions")
+
+    @property
+    def native_value(self) -> int | None:
+        history = self.coordinator.history
+        return len(history.suggestions) if history else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        history = self.coordinator.history
+        if not history:
+            return {}
+        return {"week": history.meta.get("suggest_week"), "items": history.suggestions}

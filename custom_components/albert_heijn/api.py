@@ -445,6 +445,38 @@ class AlbertHeijnApi:
 
         return [_product_from_raw(p) for p in data.get("products", []) if p.get("webshopId")]
 
+    async def get_shopping_list(self) -> list[dict[str, Any]]:
+        """The AH shopping list (in the AH app also the basket): product_id (None for free text), title, quantity, checked."""
+        data = await self._request("GET", "/mobile-services/shoppinglist/v2/items")
+        out = []
+        for row in (data or {}).get("items") or []:
+            product = (row.get("productDetails") or {}).get("product") or {}
+            pid = product.get("webshopId") or row.get("productId")
+            out.append({
+                "product_id": pid if row.get("originCode") == "PRD" and pid else None,
+                "title": product.get("title") or row.get("description") or "",
+                "quantity": int(row.get("quantity") or 1),
+                "checked": bool(row.get("strikedthrough")),
+            })
+        return out
+
+    async def set_list_items(self, items: list[dict[str, Any]]) -> None:
+        """Put products on the AH shopping list with a quantity. AH upserts on productId and sets (not adds) the quantity."""
+        body = [
+            {
+                "description": i.get("title") or str(i["product_id"]),
+                "searchTerm": i.get("title") or str(i["product_id"]),
+                "type": "SHOPPABLE",
+                "originCode": "PRD",
+                "quantity": int(i.get("quantity") or 1),
+                "strikeThrough": False,
+                "productId": int(i["product_id"]),
+            }
+            for i in items
+        ]
+        if body:
+            await self._request("PATCH", "/mobile-services/shoppinglist/v2/items", json_data={"items": body})
+
     async def get_prices(self, product_ids: list[int]) -> list[dict[str, Any]]:
         """Current prices for up to ~30 products in one request (price, price without bonus, bonus, unit price)."""
         if not product_ids:

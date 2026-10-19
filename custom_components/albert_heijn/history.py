@@ -18,6 +18,7 @@ from homeassistant.helpers.storage import Store
 
 from . import db
 from .api import AlbertHeijnApi, AlbertHeijnApiError, Fulfillment
+from .suggest import REGULAR_DAYS, compute_suggestions, week_start
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -130,6 +131,7 @@ class OrderHistory:
         self._frequent: list[dict[str, Any]] = []
         self.closed_supported: bool | None = None
         self.last_error: str | None = None
+        self.suggestions: list[dict[str, Any]] = []
 
     async def _run(self, func, *args):
         return await self._hass.async_add_executor_job(func, self._path, *args)
@@ -139,6 +141,8 @@ class OrderHistory:
         await self._import_old_store()
         self.meta = await self._run(db.get_meta)
         await self._refresh_cache()
+        if week := self.meta.get("suggest_week"):
+            self.suggestions = await self._run(db.get_suggestions, week)
 
     async def _import_old_store(self) -> None:
         """One-time import of the JSON history of fork 0.6/0.7 (.storage/albert_heijn.history.<entry>)."""
@@ -182,7 +186,45 @@ class OrderHistory:
     async def async_price_history(self, product_id: int) -> list[dict[str, Any]]:
         return await self._run(db.price_history, product_id)
 
-    async def async_sync(self, open_orders: list[Fulfillment], refresh_catalog: bool = False) -> bool:
+    async def async_fill_list(
+        self,
+        open_orders: list[Fulfillment],
+        in_order: set[int],
+        week: str,
+        dry_run: bool = False,
+        min_count: int = 3,
+        min_share: float = 0.3,
+        max_items: int = 25,
+    ) -> dict[str, Any]:
+        """Put this week's suggestions (rhythm + bonus) on the AH shopping list, and remember why."""
+        today = date.today()
+        # bonus information must be from this bonus week
+        if (self.meta.get("prices_at") or "")[:10] < week_start(today).isoformat():
+            await self.async_sync(open_orders, refresh_prices=True)
+        on_list = {i["product_id"] for i in await self._api.get_shopping_list() if i.get("product_id")}
+        before = {s["product_id"] for s in await self._run(db.get_suggestions, week)}
+        frequent = [p for p in self._frequent if p.get("count")]
+        since = (today - timedelta(days=REGULAR_DAYS + 7)).isoformat()
+        series = await self._run(db.price_series, [p["product_id"] for p in frequent], since)
+        rows = await self._hass.async_add_executor_job(
+            compute_suggestions, frequent, series, on_list | set(in_order) | before, today, min_count, min_share, max_items
+        )
+        if rows and not dry_run:
+            await self._api.set_list_items(rows)
+            await self._run(db.save_suggestions, week, rows, _now())
+            self.meta["suggest_week"] = week
+            await self._run(db.set_meta, {"suggest_week": week})
+            self.suggestions = await self._run(db.get_suggestions, week)
+        return {
+            "week": week,
+            "dry_run": dry_run,
+            "added": rows,
+            "skipped": {"on_list": len(on_list), "in_order": len(in_order), "earlier_this_week": len(before)},
+        }
+
+    async def async_sync(
+        self, open_orders: list[Fulfillment], refresh_catalog: bool = False, refresh_prices: bool = False
+    ) -> bool:
         """Fetch new delivered orders, the catalog and prices (each when due). Returns True if anything changed."""
         if self._lock.locked():
             return False
@@ -237,7 +279,7 @@ class OrderHistory:
             await self._refresh_cache()
 
             # 4. Weekly price check for everything we buy (history first, then the catalog)
-            if refresh_catalog or _older_than(self.meta.get("prices_at"), PRICE_EVERY_DAYS):
+            if refresh_catalog or refresh_prices or _older_than(self.meta.get("prices_at"), PRICE_EVERY_DAYS):
                 got, err = await self._fetch_prices(today)
                 if err:
                     errors.append(f"Prijzen: {err}")
