@@ -25,6 +25,7 @@ SERVICE_REVERT_ORDER = "revert_order"
 SERVICE_LOOKUP_BARCODE = "lookup_barcode"
 SERVICE_GET_FREQUENT_ITEMS = "get_frequent_items"
 SERVICE_SYNC_HISTORY = "sync_history"
+SERVICE_GET_PRICE_HISTORY = "get_price_history"
 
 ATTR_QUERY = "query"
 ATTR_PRODUCT_ID = "product_id"
@@ -90,6 +91,8 @@ GET_FREQUENT_ITEMS_SCHEMA = vol.Schema(
         vol.Optional(ATTR_INCLUDE_CATALOG, default=True): cv.boolean,
     }
 )
+
+PRICE_HISTORY_SCHEMA = vol.Schema({vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int)})
 
 SYNC_HISTORY_SCHEMA = vol.Schema(
     {vol.Optional(ATTR_REFRESH_CATALOG, default=False): cv.boolean}
@@ -191,6 +194,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             "products": history.frequent(call.data[ATTR_LIMIT], call.data[ATTR_INCLUDE_CATALOG]),
         }
 
+    async def handle_get_price_history(call: ServiceCall) -> ServiceResponse:
+        """Weekly prices and paid prices of one product."""
+        coordinator = _get_coordinator(hass)
+        if not coordinator.history:
+            raise HomeAssistantError("Order history not available")
+        return {"prices": coordinator.history.price_history(call.data[ATTR_PRODUCT_ID])}
+
     async def handle_sync_history(call: ServiceCall) -> ServiceResponse:
         """Fetch new delivered orders now (normally once a day)."""
         coordinator = _get_coordinator(hass)
@@ -259,6 +269,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_GET_PRICE_HISTORY,
+        handle_get_price_history,
+        schema=PRICE_HISTORY_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_SYNC_HISTORY,
         handle_sync_history,
         schema=SYNC_HISTORY_SCHEMA,
@@ -277,5 +295,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_LOOKUP_BARCODE,
         SERVICE_GET_FREQUENT_ITEMS,
         SERVICE_SYNC_HISTORY,
+        SERVICE_GET_PRICE_HISTORY,
     ):
         hass.services.async_remove(DOMAIN, service)

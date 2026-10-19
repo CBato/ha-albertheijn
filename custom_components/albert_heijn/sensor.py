@@ -438,7 +438,7 @@ class AHFrequentlyOrderedSensor(AHBaseSensor):
     _attr_name = "Vaak besteld"
     _attr_icon = "mdi:cart-heart"
     _attr_native_unit_of_measurement = "producten"
-    _unrecorded_attributes = frozenset({"top"})
+    _unrecorded_attributes = frozenset({"top", "due"})
 
     TOP = 25
 
@@ -463,7 +463,7 @@ class AHFrequentlyOrderedSensor(AHBaseSensor):
         delivered = history.delivered()
         dates = sorted(o.get("date", "") for o in delivered if o.get("date"))
         top = [
-            {k: p.get(k) for k in ("product_id", "title", "count", "last", "interval_days", "image_url")}
+            {k: p.get(k) for k in ("product_id", "title", "count", "usual_qty", "every_weeks", "per_week", "last", "due", "image_url")}
             for p in history.frequent(self.TOP, include_catalog=False)
         ]
         return {
@@ -473,6 +473,8 @@ class AHFrequentlyOrderedSensor(AHBaseSensor):
             "catalog": len(history.data.get("catalog") or []),
             "closed_orders_supported": history.closed_supported,
             "synced_at": history.data.get("synced_at"),
+            "prices_at": history.data.get("prices_at"),
+            "due": [p["title"] for p in history.frequent(200, include_catalog=False) if p.get("due") and (p.get("share") or 0) >= 0.3],
             "last_error": history.last_error,
             "top": top,
         }

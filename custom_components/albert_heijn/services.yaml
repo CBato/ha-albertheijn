@@ -150,3 +150,17 @@ sync_history:
       default: false
       selector:
         boolean:
+
+get_price_history:
+  name: Get price history
+  description: Weekly prices (price, price without bonus, bonus) and the prices paid in delivered orders for one product.
+  fields:
+    product_id:
+      name: Product ID
+      description: The webshop product ID.
+      required: true
+      example: 54074
+      selector:
+        number:
+          min: 1
+          mode: box

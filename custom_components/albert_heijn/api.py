@@ -108,6 +108,9 @@ class OrderItem:
     unit_size: str
     category: str = ""
     image_url: str | None = None
+    price_before_bonus: float | None = None
+    bonus: str | None = None
+    unit_price: str | None = None
 
 
 @dataclass
@@ -409,6 +412,9 @@ class AlbertHeijnApi:
                         unit_size=product.get("salesUnitSize", ""),
                         category=category,
                         image_url=_image_url(product),
+                        price_before_bonus=product.get("priceBeforeBonus"),
+                        bonus=(product.get("bonusMechanism") or None) if product.get("isBonus") else None,
+                        unit_price=product.get("unitPriceDescription"),
                     )
                 )
         return items
@@ -438,6 +444,27 @@ class AlbertHeijnApi:
         )
 
         return [_product_from_raw(p) for p in data.get("products", []) if p.get("webshopId")]
+
+    async def get_prices(self, product_ids: list[int]) -> list[dict[str, Any]]:
+        """Current prices for up to ~30 products in one request (price, price without bonus, bonus, unit price)."""
+        if not product_ids:
+            return []
+        query = "&".join(f"ids={int(i)}" for i in product_ids)
+        data = await self._request(
+            "GET", f"/mobile-services/product/search/v2/products?{query}&sortOn=INPUT_PRODUCT_IDS"
+        )
+        rows = data if isinstance(data, list) else (data or {}).get("products") or []
+        return [
+            {
+                "product_id": p.get("webshopId"),
+                "price": p.get("currentPrice") or p.get("priceBeforeBonus"),
+                "price_before_bonus": p.get("priceBeforeBonus"),
+                "bonus": (p.get("bonusMechanism") or "Bonus") if p.get("isBonus") else None,
+                "unit_price": p.get("unitPriceDescription"),
+            }
+            for p in rows
+            if isinstance(p, dict) and p.get("webshopId")
+        ]
 
     async def lookup_gtin(self, code: str) -> Product | None:
         """Find the AH product for a barcode (EAN-8/13, UPC-A, GTIN-14). None if AH doesn't sell it."""
