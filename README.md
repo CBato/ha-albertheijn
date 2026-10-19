@@ -4,13 +4,15 @@
 
 A Home Assistant custom integration for Albert Heijn grocery delivery, providing order tracking sensors and voice control through Assist.
 
-## This fork (CBato, 0.7.0)
+## This fork (CBato, 0.8.0)
 
 Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) with:
 
-- **Order history** — delivered orders are stored locally (`.storage/albert_heijn.history.<entry>`), so the
-  history keeps growing even when AH stops returning old orders. Synced shortly after start, once a day and
-  after each delivery. Also keeps AH's own "Eerder gekocht" list as a catalog.
+- **Order history in SQLite** — `/config/albert_heijn.db` (part of HA backups) with the tables `orders`,
+  `order_items` (quantity, price, price without bonus, bonus, unit price), `products` (incl. AH's "Eerder gekocht"
+  as `in_catalog`) and `prices` (weekly). The history keeps growing even when AH stops returning old orders.
+  Synced shortly after start, once a day and after each delivery; catalog and prices once a week.
+  A JSON history from 0.6/0.7 is imported once.
 - **`sensor.albert_heijn_vaak_besteld`** — number of products in the history, with the top 25
   (count, last ordered, average interval) as attribute.
 - **`albert_heijn.get_frequent_items`** — up to 1000 products, most often and recently ordered first,
@@ -23,7 +25,7 @@ Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) wi
 - **Order rhythm** per product in `get_frequent_items`: `usual_qty` (usually per order), `every_weeks`,
   `share` (part of the orders since it was first ordered), `per_week` (average quantity per week) and `due`.
   The sensor lists what is due again (`due` attribute).
-- **Weekly price check** of the ~300 products you buy (price, price without bonus, bonus, unit price), and the
+- **Weekly price check** of all products you buy or bought before (price, price without bonus, bonus, unit price), and the
   price paid per order; `albert_heijn.get_price_history` returns them per product. Basis for a price watch and
   for checking whether a bonus is a real discount.
 

@@ -452,7 +452,7 @@ class AHFrequentlyOrderedSensor(AHBaseSensor):
         history = self.coordinator.history
         if not history:
             return None
-        return len({i.get("product_id") for o in history.delivered() for i in o.get("items", [])})
+        return history.summary.get("products_ordered")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -460,20 +460,13 @@ class AHFrequentlyOrderedSensor(AHBaseSensor):
         history = self.coordinator.history
         if not history:
             return {}
-        delivered = history.delivered()
-        dates = sorted(o.get("date", "") for o in delivered if o.get("date"))
         top = [
             {k: p.get(k) for k in ("product_id", "title", "count", "usual_qty", "every_weeks", "per_week", "last", "due", "image_url")}
             for p in history.frequent(self.TOP, include_catalog=False)
         ]
         return {
-            "orders": len(delivered),
-            "first_order": dates[0] if dates else None,
-            "last_order": dates[-1] if dates else None,
-            "catalog": len(history.data.get("catalog") or []),
+            **history.summary,
             "closed_orders_supported": history.closed_supported,
-            "synced_at": history.data.get("synced_at"),
-            "prices_at": history.data.get("prices_at"),
             "due": [p["title"] for p in history.frequent(200, include_catalog=False) if p.get("due") and (p.get("share") or 0) >= 0.3],
             "last_error": history.last_error,
             "top": top,

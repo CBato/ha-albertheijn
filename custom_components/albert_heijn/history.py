@@ -1,4 +1,8 @@
-"""Order history for Albert Heijn: delivered orders kept in HA storage, frequently ordered products."""
+"""Order history for Albert Heijn: delivered orders and weekly prices in a SQLite database (db.py).
+
+The database keeps growing even when AH stops returning old orders. Sensors and services read from an
+in-memory cache that is rebuilt after each sync, so nothing blocks the event loop.
+"""
 
 from __future__ import annotations
 
@@ -12,64 +16,181 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from .api import AlbertHeijnApi, AlbertHeijnApiError, Fulfillment, OrderItem
+from . import db
+from .api import AlbertHeijnApi, AlbertHeijnApiError, Fulfillment
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_VERSION = 1
+DB_FILE = "albert_heijn.db"
 # Recent orders count more: an order from HALF_LIFE_DAYS ago weighs half as much as one from today
 HALF_LIFE_DAYS = 180
-CATALOG_MAX_PAGES = 10
+CATALOG_MAX_PAGES = 20  # 2000 products
 CATALOG_PAGE_SIZE = 100
-REQUEST_PAUSE = 0.3  # seconds between order detail requests during a sync
+REQUEST_PAUSE = 0.3  # seconds between requests to AH during a sync
 PRICE_EVERY_DAYS = 7  # weekly price check
-PRICE_PRODUCTS = 300  # how many products (most ordered first, then "Eerder gekocht")
+PRICE_MAX_PRODUCTS = 2000
 PRICE_BATCH = 30
-PRICE_KEEP = 156  # weekly points per product (3 years)
+CATALOG_EVERY_DAYS = 7
 
 
-def _item_dict(item: OrderItem) -> dict[str, Any]:
-    d = asdict(item)
-    return {k: v for k, v in d.items() if v not in (None, "")}
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _older_than(stamp: str | None, days: int) -> bool:
+    if not stamp:
+        return True
+    try:
+        return date.fromisoformat(stamp[:10]) <= date.today() - timedelta(days=days)
+    except ValueError:
+        return True
+
+
+def compute_frequent(snapshot: dict[str, Any], today: date | None = None) -> list[dict[str, Any]]:
+    """Products sorted by how often (and how recently) they were delivered, with their order rhythm,
+    followed by the rest of "Eerder gekocht".
+
+    Per product: count (orders), quantity (total), usual_qty (median per order), every_weeks (median gap),
+    share (part of the orders since it was first ordered), per_week (average quantity per week),
+    days_since, due (it's about time again), and the latest weekly price.
+    """
+    today = today or date.today()
+    order_days = [date.fromisoformat(d) for d in snapshot["order_days"]]
+    latest = order_days[-1] if order_days else today
+    prices = snapshot["latest_prices"]
+
+    stats: dict[int, dict[str, Any]] = {}
+    for row in snapshot["items"]:
+        day = date.fromisoformat(row["date"])
+        pid = row["product_id"]
+        s = stats.get(pid)
+        if s is None:
+            s = stats[pid] = {
+                "product_id": pid, "title": row.get("title") or "", "brand": row.get("brand") or "",
+                "unit_size": row.get("unit_size") or "", "category": row.get("category") or "",
+                "image_url": row.get("image_url"), "count": 0, "quantity": 0, "score": 0.0, "_days": [], "_qty": [],
+            }
+        qty = int(row.get("quantity") or 1)
+        if s["_days"] and s["_days"][-1] == day:
+            s["_qty"][-1] += qty
+        else:
+            s["_days"].append(day)
+            s["_qty"].append(qty)
+            s["count"] += 1
+            s["score"] += 0.5 ** (max((today - day).days, 0) / HALF_LIFE_DAYS)
+        s["quantity"] += qty
+
+    result = sorted(stats.values(), key=lambda s: (-s["score"], -s["count"], s["title"]))
+    for s in result:
+        days, qtys = s.pop("_days"), s.pop("_qty")
+        first, last = days[0], days[-1]
+        since_first = sum(1 for d in order_days if d >= first)
+        gaps = [(b - a).days for a, b in zip(days, days[1:])]
+        gap = median(gaps) if gaps else None
+        weeks = max(1.0, ((latest - first).days / 7) + 1)
+        s.update({
+            "first": first.isoformat(), "last": last.isoformat(),
+            "days_since": (today - last).days,
+            "usual_qty": int(median(qtys)),
+            "every_weeks": max(1, round(gap / 7)) if gap else None,
+            "interval_days": round(gap) if gap else None,
+            "share": round(s["count"] / since_first, 2) if since_first else None,
+            "per_week": round(s["quantity"] / weeks, 1),
+            "due": bool(gap) and (today - last).days >= gap,
+            "score": round(s["score"], 2),
+        })
+        if p := prices.get(s["product_id"]):
+            s["price"], s["price_bonus"] = p["price"], p["bonus"]
+
+    seen = set(stats)
+    extra = []
+    for p in snapshot["catalog"]:
+        if p["product_id"] in seen:
+            continue
+        row = {**p, "count": 0, "quantity": 0, "score": 0, "first": None, "last": None, "interval_days": None,
+               "every_weeks": None, "usual_qty": None, "share": None, "per_week": None, "days_since": None, "due": False}
+        if lp := prices.get(p["product_id"]):
+            row["price"], row["price_bonus"] = lp["price"], lp["bonus"]
+        extra.append(row)
+    return result + sorted(extra, key=lambda p: (p.get("title") or "").lower())
 
 
 class OrderHistory:
-    """Delivered orders stored locally, so history keeps growing even if AH forgets old orders.
-
-    Stored per order: delivery date, status ("open" snapshot or "delivered") and its products.
-    Also keeps AH's own "Eerder gekocht" list as a catalog of everything ever bought.
-    """
+    """Delivered orders, AH's "Eerder gekocht" catalog and weekly prices, stored in /config/albert_heijn.db."""
 
     def __init__(self, hass: HomeAssistant, api: AlbertHeijnApi, entry_id: str) -> None:
+        self._hass = hass
         self._api = api
-        self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.history.{entry_id}")
+        self._entry_id = entry_id
+        self._path = hass.config.path(DB_FILE)
         self._lock = asyncio.Lock()
-        self.data: dict[str, Any] = {
-            "orders": {}, "catalog": [], "catalog_at": None, "synced_at": None, "prices": {}, "prices_at": None,
-        }
+        self.meta: dict[str, str] = {}
+        self.summary: dict[str, Any] = {}
+        self._frequent: list[dict[str, Any]] = []
         self.closed_supported: bool | None = None
         self.last_error: str | None = None
 
+    async def _run(self, func, *args):
+        return await self._hass.async_add_executor_job(func, self._path, *args)
+
     async def async_load(self) -> None:
-        if stored := await self._store.async_load():
-            self.data.update(stored)
+        await self._run(db.init)
+        await self._import_old_store()
+        self.meta = await self._run(db.get_meta)
+        await self._refresh_cache()
 
-    @property
-    def orders(self) -> dict[str, dict[str, Any]]:
-        return self.data["orders"]
+    async def _import_old_store(self) -> None:
+        """One-time import of the JSON history of fork 0.6/0.7 (.storage/albert_heijn.history.<entry>)."""
+        store: Store[dict[str, Any]] = Store(self._hass, 1, f"{DOMAIN}.history.{self._entry_id}")
+        old = await store.async_load()
+        if not old:
+            return
+        now = _now()
+        for key, order in (old.get("orders") or {}).items():
+            await self._run(db.save_order, int(key), order.get("date", ""), order.get("status", "open"), order.get("items") or [], now)
+        if old.get("catalog"):
+            await self._run(db.save_catalog, old["catalog"], now)
+        for pid, series in (old.get("prices") or {}).items():
+            for pt in series:
+                await self._run(db.save_prices, pt["d"], [{"product_id": int(pid), "price": pt.get("p"),
+                                "price_before_bonus": pt.get("b"), "bonus": pt.get("bonus"), "unit_price": pt.get("u")}])
+        await store.async_remove()
+        _LOGGER.info("Albert Heijn: old JSON history imported into %s", DB_FILE)
 
-    def delivered(self) -> list[dict[str, Any]]:
-        return [o for o in self.orders.values() if o.get("status") == "delivered"]
+    async def _refresh_cache(self) -> None:
+        snap = await self._run(db.load_for_frequent)
+        self._frequent = await self._hass.async_add_executor_job(compute_frequent, snap)
+        days = snap["order_days"]
+        self.summary = {
+            "orders": len(days),
+            "first_order": days[0] if days else None,
+            "last_order": days[-1] if days else None,
+            "products_ordered": sum(1 for p in self._frequent if p["count"]),
+            "catalog": len(snap["catalog"]),
+            "products": snap["products"],
+            "price_points": snap["price_points"],
+            "synced_at": self.meta.get("synced_at"),
+            "prices_at": self.meta.get("prices_at"),
+            "catalog_at": self.meta.get("catalog_at"),
+        }
+
+    def frequent(self, limit: int = 100, include_catalog: bool = True) -> list[dict[str, Any]]:
+        rows = self._frequent if include_catalog else [p for p in self._frequent if p["count"]]
+        return [dict(p) for p in rows[:limit]]
+
+    async def async_price_history(self, product_id: int) -> list[dict[str, Any]]:
+        return await self._run(db.price_history, product_id)
 
     async def async_sync(self, open_orders: list[Fulfillment], refresh_catalog: bool = False) -> bool:
-        """Fetch new delivered orders (and the catalog once a day). Returns True if anything changed."""
+        """Fetch new delivered orders, the catalog and prices (each when due). Returns True if anything changed."""
         if self._lock.locked():
             return False
         async with self._lock:
             changed = False
-            today = date.today().isoformat()
-            self.last_error = None
+            errors: list[str] = []
+            now, today = _now(), date.today().isoformat()
+            known = await self._run(db.order_status)
 
             # 1. Delivered orders straight from AH (undocumented CLOSED status)
             try:
@@ -80,26 +201,22 @@ class OrderHistory:
                 self.closed_supported = False
                 closed = []
             for order_id, day in closed:
-                key = str(order_id)
-                if self.orders.get(key, {}).get("status") == "delivered":
+                if known.get(order_id) == "delivered":
                     continue
-                if await self._fetch_order(key, day, "delivered"):
+                if await self._fetch_order(order_id, day, "delivered", now):
                     changed = True
                 await asyncio.sleep(REQUEST_PAUSE)
 
-            # 2. Snapshot of open orders with products; one that is gone after its delivery date was delivered
-            open_ids = {str(f.order_id) for f in open_orders}
+            # 2. Snapshot of open orders with products; gone after their delivery date = delivered
             for f in open_orders:
-                if f.total_price > 0 and await self._fetch_order(str(f.order_id), f.delivery_slot.date, "open"):
+                if f.total_price > 0 and await self._fetch_order(f.order_id, f.delivery_slot.date, "open", now):
                     changed = True
                 await asyncio.sleep(REQUEST_PAUSE)
-            for key, order in self.orders.items():
-                if order.get("status") == "open" and key not in open_ids and order.get("date", "9999") < today:
-                    order["status"] = "delivered"
-                    changed = True
+            if await self._run(db.mark_delivered, {f.order_id for f in open_orders}, today):
+                changed = True
 
-            # 3. AH "Eerder gekocht" catalog, once a day
-            if refresh_catalog or (self.data.get("catalog_at") or "")[:10] != today:
+            # 3. AH "Eerder gekocht" catalog, weekly
+            if refresh_catalog or _older_than(self.meta.get("catalog_at"), CATALOG_EVERY_DAYS):
                 try:
                     catalog: list[dict[str, Any]] = []
                     page, pages = 0, 1
@@ -107,156 +224,52 @@ class OrderHistory:
                         products, pages = await self._api.get_previously_bought(CATALOG_PAGE_SIZE, page)
                         catalog.extend(products)
                         page += 1
-                    self.data["catalog"] = catalog
-                    self.data["catalog_at"] = datetime.now(timezone.utc).isoformat()
-                    changed = True
+                        await asyncio.sleep(REQUEST_PAUSE)
+                    if catalog:
+                        await self._run(db.save_catalog, catalog, now)
+                        self.meta["catalog_at"] = now
+                        changed = True
                 except AlbertHeijnApiError as err:
                     _LOGGER.debug("Previously bought not available: %s", err)
-                    self.last_error = f"Eerder gekocht: {err}"
+                    errors.append(f"Eerder gekocht: {err}")
 
-            # 4. Weekly price check (price, price without bonus, bonus) for the products we buy
-            last = self.data.get("prices_at")
-            if refresh_catalog or not last or date.fromisoformat(last[:10]) <= date.today() - timedelta(days=PRICE_EVERY_DAYS):
-                if await self._fetch_prices():
+            # rebuild the cache first: the price check uses the product list
+            await self._refresh_cache()
+
+            # 4. Weekly price check for everything we buy (history first, then the catalog)
+            if refresh_catalog or _older_than(self.meta.get("prices_at"), PRICE_EVERY_DAYS):
+                got, err = await self._fetch_prices(today)
+                if err:
+                    errors.append(f"Prijzen: {err}")
+                if got:
+                    self.meta["prices_at"] = now
                     changed = True
 
-            self.data["synced_at"] = datetime.now(timezone.utc).isoformat()
-            await self._store.async_save(self.data)
+            self.meta["synced_at"] = now
+            await self._run(db.set_meta, self.meta)
+            self.last_error = "; ".join(errors) or None
+            await self._refresh_cache()
             return changed
 
-    async def _fetch_prices(self) -> bool:
-        ids: list[int] = []
-        for p in self.frequent(PRICE_PRODUCTS, include_catalog=True):
-            if p.get("product_id") and p["product_id"] not in ids:
-                ids.append(int(p["product_id"]))
-        if not ids:
+    async def _fetch_order(self, order_id: int, day: str, status: str, now: str) -> bool:
+        try:
+            items = await self._api.get_order_items(int(order_id))
+        except AlbertHeijnApiError as err:
+            _LOGGER.debug("Could not fetch items of order %s: %s", order_id, err)
             return False
-        today = date.today().isoformat()
-        prices = self.data.setdefault("prices", {})
+        if not items:
+            return False
+        return await self._run(db.save_order, int(order_id), day, status, [asdict(i) for i in items], now)
+
+    async def _fetch_prices(self, today: str) -> tuple[int, str | None]:
+        ids = [int(p["product_id"]) for p in self._frequent[:PRICE_MAX_PRODUCTS] if p.get("product_id")]
         got = 0
         for i in range(0, len(ids), PRICE_BATCH):
             try:
                 rows = await self._api.get_prices(ids[i : i + PRICE_BATCH])
             except AlbertHeijnApiError as err:
                 _LOGGER.debug("Price check failed: %s", err)
-                self.last_error = f"Prijzen: {err}"
-                break
-            for r in rows:
-                if r.get("price") is None:
-                    continue
-                series = prices.setdefault(str(r["product_id"]), [])
-                point = {"d": today, "p": r["price"], "b": r.get("price_before_bonus"), "bonus": r.get("bonus"), "u": r.get("unit_price")}
-                if series and series[-1].get("d") == today:
-                    series[-1] = point
-                else:
-                    series.append(point)
-                del series[:-PRICE_KEEP]
-                got += 1
+                return got, str(err)
+            got += await self._run(db.save_prices, today, rows)
             await asyncio.sleep(REQUEST_PAUSE)
-        if got:
-            self.data["prices_at"] = datetime.now(timezone.utc).isoformat()
-        return got > 0
-
-    def price_history(self, product_id: int) -> list[dict[str, Any]]:
-        """Weekly prices of one product, oldest first, plus the prices paid in delivered orders."""
-        weekly = self.data.get("prices", {}).get(str(product_id), [])
-        paid = [
-            {"d": o.get("date"), "p": i.get("price"), "b": i.get("price_before_bonus"), "bonus": i.get("bonus"), "order": True}
-            for o in self.delivered()
-            for i in o.get("items", [])
-            if i.get("product_id") == product_id
-        ]
-        return sorted(weekly + paid, key=lambda x: x.get("d") or "")
-
-    async def _fetch_order(self, key: str, day: str, status: str) -> bool:
-        try:
-            items = await self._api.get_order_items(int(key))
-        except AlbertHeijnApiError as err:
-            _LOGGER.debug("Could not fetch items of order %s: %s", key, err)
-            return False
-        if not items:
-            return False
-        new = {"date": day, "status": status, "items": [_item_dict(i) for i in items]}
-        if self.orders.get(key) == new:
-            return False
-        self.orders[key] = new
-        return True
-
-    def frequent(self, limit: int = 100, include_catalog: bool = True) -> list[dict[str, Any]]:
-        """Products sorted by how often (and how recently) they were delivered, with their order rhythm.
-
-        Per product: count (orders), quantity (total), usual_qty (median per order), every_weeks (median gap),
-        share (part of the orders since it was first ordered), per_week (average quantity per week),
-        days_since, due (it's about time again), and the latest weekly price.
-        """
-        today = date.today()
-        orders = []
-        for order in self.delivered():
-            try:
-                orders.append((date.fromisoformat(order.get("date", "")), order))
-            except ValueError:
-                continue
-        orders.sort(key=lambda x: x[0])
-        order_days = [d for d, _ in orders]
-        latest = order_days[-1] if order_days else today
-
-        stats: dict[int, dict[str, Any]] = {}
-        for day, order in orders:
-            weight = 0.5 ** (max((today - day).days, 0) / HALF_LIFE_DAYS)
-            for item in order.get("items", []):
-                pid = item.get("product_id")
-                if not pid:
-                    continue
-                s = stats.get(pid)
-                if s is None:
-                    s = stats[pid] = {
-                        "product_id": pid, "title": item.get("title", ""), "brand": item.get("brand", ""),
-                        "unit_size": item.get("unit_size", ""), "category": item.get("category", ""),
-                        "image_url": item.get("image_url"), "count": 0, "quantity": 0, "score": 0.0,
-                        "_days": [], "_qty": [],
-                    }
-                qty = int(item.get("quantity") or 1)
-                if s["_days"] and s["_days"][-1] == day:
-                    s["_qty"][-1] += qty
-                else:
-                    s["_days"].append(day)
-                    s["_qty"].append(qty)
-                    s["count"] += 1
-                    s["score"] += weight
-                s["quantity"] += qty
-                s["title"] = item.get("title") or s["title"]
-                s["image_url"] = item.get("image_url") or s["image_url"]
-
-        prices = self.data.get("prices", {})
-        result = sorted(stats.values(), key=lambda s: (-s["score"], -s["count"], s["title"]))
-        for s in result:
-            days, qtys = s.pop("_days"), s.pop("_qty")
-            first, last = days[0], days[-1]
-            since_first = sum(1 for d in order_days if d >= first)
-            gaps = [(b - a).days for a, b in zip(days, days[1:])]
-            gap = median(gaps) if gaps else None
-            weeks = max(1.0, ((latest - first).days / 7) + 1)
-            s.update({
-                "first": first.isoformat(), "last": last.isoformat(),
-                "days_since": (today - last).days,
-                "usual_qty": int(median(qtys)),
-                "every_weeks": max(1, round(gap / 7)) if gap else None,
-                "interval_days": round(gap) if gap else None,
-                "share": round(s["count"] / since_first, 2) if since_first else None,
-                "per_week": round(s["quantity"] / weeks, 1),
-                "due": bool(gap) and (today - last).days >= gap,
-                "score": round(s["score"], 2),
-            })
-            if series := prices.get(str(s["product_id"])):
-                s["price"], s["price_bonus"] = series[-1].get("p"), series[-1].get("bonus")
-
-        if include_catalog:
-            seen = set(stats)
-            extra = [
-                {**p, "count": 0, "quantity": 0, "score": 0, "first": None, "last": None, "interval_days": None,
-                 "every_weeks": None, "usual_qty": None, "share": None, "per_week": None, "days_since": None, "due": False}
-                for p in self.data.get("catalog") or []
-                if p.get("product_id") not in seen
-            ]
-            result += sorted(extra, key=lambda p: p.get("title", "").lower())
-        return result[:limit]
+        return got, None

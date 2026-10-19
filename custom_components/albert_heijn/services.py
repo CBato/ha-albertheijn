@@ -189,8 +189,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError("Order history not available")
         history = coordinator.history
         return {
-            "orders": len(history.delivered()),
-            "synced_at": history.data.get("synced_at"),
+            "orders": history.summary.get("orders"),
+            "synced_at": history.summary.get("synced_at"),
             "products": history.frequent(call.data[ATTR_LIMIT], call.data[ATTR_INCLUDE_CATALOG]),
         }
 
@@ -199,7 +199,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         coordinator = _get_coordinator(hass)
         if not coordinator.history:
             raise HomeAssistantError("Order history not available")
-        return {"prices": coordinator.history.price_history(call.data[ATTR_PRODUCT_ID])}
+        return {"prices": await coordinator.history.async_price_history(call.data[ATTR_PRODUCT_ID])}
 
     async def handle_sync_history(call: ServiceCall) -> ServiceResponse:
         """Fetch new delivered orders now (normally once a day)."""
@@ -208,8 +208,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         history = coordinator.history
         return {
             "changed": changed,
-            "orders": len(history.delivered()) if history else 0,
-            "catalog": len(history.data.get("catalog") or []) if history else 0,
+            **(history.summary if history else {}),
             "closed_orders_supported": history.closed_supported if history else None,
             "last_error": history.last_error if history else None,
         }
