@@ -316,6 +316,10 @@ class OrderHistory:
                         if order_id in known and await self._run(db.delete_order, order_id):
                             changed = True
                         continue
+                    # AH states: DELIVERED, CONFIRMED (still to come), CANCELLED; without a state: by date
+                    state = (c.get("state") or "").upper()
+                    if state and state != "DELIVERED":
+                        continue
                     if not day or day >= today or known.get(order_id) == "delivered":
                         continue
                     if await self._fetch_order(order_id, day, "delivered", now):
