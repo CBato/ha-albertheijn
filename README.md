@@ -4,7 +4,7 @@
 
 A Home Assistant custom integration for Albert Heijn grocery delivery, providing order tracking sensors and voice control through Assist.
 
-## This fork (CBato, 0.12.1)
+## This fork (CBato, 0.12.2)
 
 Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) with:
 
@@ -36,6 +36,9 @@ Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) wi
 - **Pause-proof rhythm** — after a pause (nothing bought for more than twice the usual interval, e.g. an AH outage)
   "due" is judged as if one usual interval has passed. Rhythm (`share`, `every_weeks`, `per_week`) is counted over the
   weeks we have data for (a delivery or a receipt), so gaps in the data don't make products look rarer than they are.
+  The rhythm is taken from the period with known deliveries (receipts alone miss the deliveries) and measured over the
+  active period (first to last purchase). Products not bought for 3 usual intervals (6 weeks at least) are `stopped`
+  and never suggested.
 - **`albert_heijn.graphql_query`** — read-only GraphQL query, to explore the AH API (introspection is disabled at AH).
 - **`albert_heijn.probe_order_history`** — tries pagination/status/REST variants to find older delivered orders.
 - **`albert_heijn.sync_history`** — sync now; reports whether AH supports closed orders.
