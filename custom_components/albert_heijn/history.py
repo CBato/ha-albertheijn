@@ -177,6 +177,7 @@ class OrderHistory:
         self.last_error: str | None = None
         self.suggestions: list[dict[str, Any]] = []
         self.next_delivery: str | None = None  # set by the coordinator
+        self.snoozes: dict[int, str] = {}  # product_id -> not suggested until
         self.cancelled = 0  # cancelled orders seen in the last sync (not counted)
         self.summary_orders: int | None = None  # orders in the "Mijn bestellingen" list in the last sync
         self.bonus_periods: list[dict[str, Any]] = []
@@ -215,6 +216,10 @@ class OrderHistory:
     async def _refresh_cache(self) -> None:
         snap = await self._run(db.load_for_frequent)
         self._frequent = await self._hass.async_add_executor_job(compute_frequent, snap, None, self.horizon_days())
+        self.snoozes = await self._run(db.get_snoozes, date.today().isoformat())
+        for p in self._frequent:
+            if until := self.snoozes.get(p.get("product_id")):
+                p["snoozed_until"] = until
         days = snap["order_days"]
         rdays = snap.get("receipt_days") or []
         self.summary = {
@@ -272,6 +277,7 @@ class OrderHistory:
         purchases = data["purchases"]
         spent = [p["amount"] for p in purchases if p.get("amount") is not None]
         data["rhythm"] = rhythm
+        data["snoozed_until"] = self.snoozes.get(product_id)
         data["totals"] = {
             "purchases": len(purchases),
             "quantity": round(sum(float(p.get("quantity") or 0) for p in purchases), 1),
@@ -280,6 +286,17 @@ class OrderHistory:
             "last": purchases[-1]["date"] if purchases else None,
         }
         return data
+
+    async def async_snooze(self, product_id: int, days: int) -> str | None:
+        """Postpone suggesting a product: days > 0 for that many days, -1 never again, 0 suggest again."""
+        until = None
+        if days < 0:
+            until = "9999-12-31"
+        elif days > 0:
+            until = (date.today() + timedelta(days=days)).isoformat()
+        await self._run(db.set_snooze, product_id, until)
+        await self._refresh_cache()
+        return until
 
     async def async_price_history(self, product_id: int) -> list[dict[str, Any]]:
         return await self._run(db.price_history, product_id)
@@ -307,8 +324,9 @@ class OrderHistory:
         series = await self._run(db.price_series, [p["product_id"] for p in frequent], since)
         # a bonus is judged against what you really paid on average (same as the Producten table in the app)
         avg_paid = {r["product_id"]: r["avg_paid"] for r in await self._run(db.products_overview) if r.get("avg_paid")}
+        snoozed = set(await self._run(db.get_snoozes, today.isoformat()))
         rows = await self._hass.async_add_executor_job(
-            compute_suggestions, frequent, series, on_list | set(in_order) | before, today, min_count, min_share, max_items, avg_paid
+            compute_suggestions, frequent, series, on_list | set(in_order) | before | snoozed, today, min_count, min_share, max_items, avg_paid
         )
         if rows and not dry_run:
             await self._api.set_list_items(rows)

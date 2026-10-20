@@ -272,3 +272,23 @@ get_bonus:
           options:
             - current
             - next
+
+snooze_product:
+  name: Snooze product
+  description: Don't suggest a product (in fill_list and as "due") for a number of days; -1 = never again, 0 = suggest again.
+  fields:
+    product_id:
+      name: Product ID
+      required: true
+      selector:
+        number:
+          min: 1
+          mode: box
+    days:
+      name: Days
+      default: 7
+      selector:
+        number:
+          min: -1
+          max: 365
+          mode: box

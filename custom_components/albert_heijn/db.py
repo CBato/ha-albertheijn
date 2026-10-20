@@ -106,6 +106,10 @@ CREATE TABLE IF NOT EXISTS bonus_offers (
     PRIMARY KEY (week_start, product_id)
 );
 CREATE INDEX IF NOT EXISTS idx_bonus_offers_product ON bonus_offers(product_id);
+CREATE TABLE IF NOT EXISTS snoozes (
+    product_id INTEGER PRIMARY KEY,
+    until TEXT NOT NULL             -- not suggested until this date ('9999-12-31' = never again)
+);
 CREATE INDEX IF NOT EXISTS idx_order_items_product ON order_items(product_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status_date ON orders(status, date);
 """
@@ -679,3 +683,18 @@ def bonus_offers(path: str, start: str) -> list[dict[str, Any]]:
                 (start,),
             )
         ]
+
+
+def set_snooze(path: str, product_id: int, until: str | None) -> None:
+    """Don't suggest a product until a date (None = suggest again)."""
+    with closing(_connect(path)) as con, con:
+        if until:
+            con.execute("INSERT INTO snoozes(product_id, until) VALUES(?, ?) ON CONFLICT(product_id) DO UPDATE SET until = excluded.until",
+                        (product_id, until))
+        else:
+            con.execute("DELETE FROM snoozes WHERE product_id = ?", (product_id,))
+
+
+def get_snoozes(path: str, today: str) -> dict[int, str]:
+    with closing(_connect(path)) as con:
+        return {r["product_id"]: r["until"] for r in con.execute("SELECT product_id, until FROM snoozes WHERE until > ?", (today,))}

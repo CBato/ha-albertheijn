@@ -34,6 +34,7 @@ SERVICE_GET_PRODUCT_HISTORY = "get_product_history"
 SERVICE_GET_INSIGHTS = "get_insights"
 SERVICE_GET_PRODUCTS = "get_products"
 SERVICE_GET_BONUS = "get_bonus"
+SERVICE_SNOOZE_PRODUCT = "snooze_product"
 
 # Variants to find out how far back AH returns delivered orders (introspection is disabled at AH)
 _PROBE_GRAPHQL = {
@@ -291,6 +292,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Failed to fill the list: {err}") from err
 
+    async def handle_snooze_product(call: ServiceCall) -> ServiceResponse:
+        """Don't suggest a product for a while (days), never again (-1) or again (0)."""
+        coordinator = _get_coordinator(hass)
+        if not coordinator.history:
+            raise HomeAssistantError("Order history not available")
+        until = await coordinator.history.async_snooze(call.data[ATTR_PRODUCT_ID], call.data["days"])
+        coordinator.async_update_listeners()
+        return {"product_id": call.data[ATTR_PRODUCT_ID], "until": until}
+
     async def handle_get_bonus(call: ServiceCall) -> ServiceResponse:
         """Bonus of this or next week on products you buy, with the deal against what you paid on average."""
         coordinator = _get_coordinator(hass)
@@ -416,6 +426,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_SNOOZE_PRODUCT,
+        handle_snooze_product,
+        schema=vol.Schema({vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int),
+                           vol.Optional("days", default=7): vol.All(vol.Coerce(int), vol.Range(min=-1, max=365))}),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_GET_BONUS,
         handle_get_bonus,
         schema=vol.Schema({vol.Optional("week", default="current"): vol.In(["current", "next"])}),
@@ -481,5 +500,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_GET_INSIGHTS,
         SERVICE_GET_PRODUCTS,
         SERVICE_GET_BONUS,
+        SERVICE_SNOOZE_PRODUCT,
     ):
         hass.services.async_remove(DOMAIN, service)
