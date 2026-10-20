@@ -526,13 +526,13 @@ class OrderHistory:
         return out
 
     async def _fetch_bonus_weeks(self, now: str) -> bool:
-        """Store the offers of every published bonus week (refreshed at most every 12 hours)."""
+        """Store the offers of every published bonus week (refreshed once a day: the first sync of the day)."""
         stored = {w["week_start"]: w for w in await self._run(db.bonus_weeks)}
         changed = False
         for period in await self._api.get_bonus_periods():
             start = period["start"]
-            fetched = (stored.get(start) or {}).get("fetched") or ""
-            if fetched and fetched[:13] >= (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()[:13]:
+            fetched = (stored.get(start) or {}).get("fetched")
+            if fetched and dt_util.as_local(datetime.fromisoformat(fetched)).date() >= date.today():
                 continue
             offers: list[dict[str, Any]] = []
             for kind in ("personal", "previously_bought"):

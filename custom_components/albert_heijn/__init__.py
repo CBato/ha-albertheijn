@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 import logging
 from pathlib import Path
 import shutil
@@ -10,7 +9,7 @@ import shutil
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.event import async_call_later, async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_change
 
 from .const import DOMAIN
 from .coordinator import AlbertHeijnCoordinator
@@ -38,12 +37,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.history.async_load()
     await coordinator.async_config_entry_first_refresh()
 
-    # Order history: shortly after start, then once a day (and when an order is delivered, see coordinator)
+    # Order history, receipts, catalog, prices and bonus: shortly after start, then every night (and when an order
+    # is delivered, see coordinator). Each step only fetches what is new or due. The basket and the next order are
+    # live (coordinator, every minute).
     async def _sync(_now=None) -> None:
         await coordinator.async_sync_history()
 
     entry.async_on_unload(async_call_later(hass, 90, _sync))
-    entry.async_on_unload(async_track_time_interval(hass, _sync, timedelta(hours=24)))
+    entry.async_on_unload(async_track_time_change(hass, _sync, hour=4, minute=15, second=0))
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
