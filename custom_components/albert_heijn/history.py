@@ -55,8 +55,10 @@ def compute_frequent(snapshot: dict[str, Any], today: date | None = None, horizo
     """Products sorted by how often (and how recently) they were bought, with their rhythm, followed by the rest
     of "Eerder gekocht". Purchases = delivered orders + till receipts (in-store with the bonus card).
 
-    Per product: count (days bought), quantity (total), usual_qty (median per purchase), every_weeks (median gap),
-    share (part of the weeks since the first purchase in which it was bought), per_week (average use per week),
+    Per product: count (days bought), quantity (total), usual_qty (median per purchase), every_weeks (spacing),
+    share (part of the weeks in which it was bought), per_week (average use per week),
+    all counted over the weeks we have data for (a delivery or a receipt), so gaps in the data (deliveries AH no
+    longer returns) don't make products look rarer than they are;
     days_since, due, sources, and the latest weekly price.
 
     due = the stock from the last purchase (last quantity / use per week) runs out within horizon_days
@@ -71,6 +73,9 @@ def compute_frequent(snapshot: dict[str, Any], today: date | None = None, horizo
     hh_gaps = [(b - a).days for a, b in zip(days_all, days_all[1:])]
     hh_gap = median(hh_gaps) if hh_gaps else 7
     paused = (today - latest).days > max(14, 2 * hh_gap)
+    # weeks we have data for (a delivery or a receipt): weeks without any data don't count as "not bought"
+    epoch = date(2000, 1, 3)  # a Monday
+    observed = sorted({(d - epoch).days // 7 for d in days_all})
     judge_day = latest + timedelta(days=round(hh_gap)) if paused else today
 
     stats: dict[int, dict[str, Any]] = {}
@@ -107,18 +112,19 @@ def compute_frequent(snapshot: dict[str, Any], today: date | None = None, horizo
         first, last = days[0], days[-1]
         gaps = [(b - a).days for a, b in zip(days, days[1:])]
         gap = median(gaps) if gaps else None
-        weeks = max(1.0, ((latest - first).days / 7) + 1)
-        week_slots = (latest - first).days // 7 + 1
-        weeks_bought = len({(d - first).days // 7 for d in days})
-        per_week = s["quantity"] / weeks
+        first_week = (first - epoch).days // 7
+        obs_weeks = max(1, sum(1 for w in observed if w >= first_week))
+        weeks_bought = len({(d - epoch).days // 7 for d in days})
+        per_week = s["quantity"] / obs_weeks
+        spacing = obs_weeks / s["count"] if s["count"] > 1 else None  # bought every so many observed weeks
         covers = qtys[-1] / per_week * 7 if per_week else None  # days the last purchase lasts
         s.update({
             "first": first.isoformat(), "last": last.isoformat(),
             "days_since": (today - last).days,
             "usual_qty": int(median(qtys)),
-            "every_weeks": max(1, round(gap / 7)) if gap else None,
+            "every_weeks": max(1, round(spacing)) if spacing else None,
             "interval_days": round(gap) if gap else None,
-            "share": round(weeks_bought / week_slots, 2) if week_slots else None,
+            "share": round(min(1.0, weeks_bought / obs_weeks), 2),
             "per_week": round(per_week, 1),
             "covers_days": round(covers) if covers else None,
             "due": len(days) >= 2 and covers is not None and covers < (judge_day - last).days + horizon_days,
