@@ -27,6 +27,18 @@ intents:
           - "verwijder product code {product_id} uit [mijn] bestelling"
           - "haal product code {product_id} uit [mijn] bestelling"
           - "product code {product_id} verwijderen"
+  # Boodschappenlijst: eerst wat je eerder kocht; bij twijfel noemt Assist een paar producten met een nummer
+  AlbertHeijnAddToList:
+    data:
+      - sentences:
+          - "zet {product} op [de] [boodschappen]lijst"
+          - "(voeg|doe) {product} (toe aan|bij|op) [de] boodschappen[lijst]"
+          - "(we hebben|er is) geen {product} meer"
+  AlbertHeijnPickChoice:
+    data:
+      - sentences:
+          - "[zet] nummer {keuze} [op de lijst]"
+          - "[doe maar] [de] {keuze}"
   AlbertHeijnOrderStatus:
     data:
       - sentences:
@@ -35,6 +47,22 @@ intents:
           - "wanneer [komen|komt] de boodschappen [bezorging]"
           - "hoe staat het met [mijn] bestelling"
 lists:
+  product:
+    wildcard: true
+  keuze:
+    values:
+      - "1"
+      - "2"
+      - "3"
+      - "4"
+      - "een"
+      - "twee"
+      - "drie"
+      - "vier"
+      - "eerste"
+      - "tweede"
+      - "derde"
+      - "vierde"
   query:
     wildcard: true
   product_id:

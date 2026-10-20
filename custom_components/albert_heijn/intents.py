@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
+import time
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import intent
@@ -10,6 +13,7 @@ from homeassistant.helpers import intent
 from .api import AlbertHeijnApiError
 from .const import DOMAIN
 from .coordinator import AlbertHeijnCoordinator
+from .suggest import match_products
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,6 +22,12 @@ INTENT_SEARCH_PRODUCTS = "AlbertHeijnSearchProducts"
 INTENT_ADD_TO_ORDER = "AlbertHeijnAddToOrder"
 INTENT_LIST_ORDER_ITEMS = "AlbertHeijnListOrderItems"
 INTENT_REMOVE_FROM_ORDER = "AlbertHeijnRemoveFromOrder"
+INTENT_ADD_TO_LIST = "AlbertHeijnAddToList"
+INTENT_PICK_CHOICE = "AlbertHeijnPickChoice"
+
+CHOICE_SECONDS = 180  # "nummer 2" works for 3 minutes after the question
+_NUMBERS = {"een": 1, "twee": 2, "drie": 3, "vier": 4, "vijf": 5, "zes": 6, "zeven": 7, "acht": 8, "negen": 9, "tien": 10,
+            "eerste": 1, "tweede": 2, "derde": 3, "vierde": 4}
 
 
 async def async_setup_intents(hass: HomeAssistant) -> None:
@@ -27,6 +37,8 @@ async def async_setup_intents(hass: HomeAssistant) -> None:
     intent.async_register(hass, AddToOrderIntentHandler())
     intent.async_register(hass, ListOrderItemsIntentHandler())
     intent.async_register(hass, RemoveFromOrderIntentHandler())
+    intent.async_register(hass, AddToListIntentHandler())
+    intent.async_register(hass, PickChoiceIntentHandler())
 
 
 def _get_coordinator(hass: HomeAssistant) -> AlbertHeijnCoordinator:
@@ -236,4 +248,103 @@ class OrderStatusIntentHandler(intent.IntentHandler):
             parts.append("De bestelling kan niet meer worden gewijzigd.")
 
         response.async_set_speech(" ".join(parts))
+        return response
+
+
+# ---------- shopping list by voice: "zet melk op de lijst" ----------
+# Looks in what you bought before. A clear match goes on the AH shopping list straight away; otherwise Assist names
+# up to four products with a number and you answer "nummer 2". Assist has no follow-up question for custom intents,
+# so the choices are kept for CHOICE_SECONDS.
+
+_choices: dict[str, Any] = {}
+
+
+def _split_quantity(text: str) -> tuple[int, str]:
+    """ "2 melk" / "twee pakken melk" -> (2, "pakken melk"); without a number (1, text)."""
+    first, _, rest = text.strip().partition(" ")
+    if rest and (first.isdigit() or first.lower() in _NUMBERS):
+        return (int(first) if first.isdigit() else _NUMBERS[first.lower()]), rest
+    return 1, text
+
+
+def _label(p: dict[str, Any]) -> str:
+    extra = [p["unit_size"]] if p.get("unit_size") else []
+    if p.get("count"):
+        extra.append(f"{p['count']} keer gekocht")
+    title = p.get("title") or f"product {p['product_id']}"
+    return f"{title} ({', '.join(extra)})" if extra else title
+
+
+async def _put_on_list(coordinator: AlbertHeijnCoordinator, p: dict[str, Any], quantity: int) -> str:
+    title = p.get("title") or f"product {p['product_id']}"
+    try:
+        already = await coordinator.async_add_to_list(int(p["product_id"]), title, quantity)
+    except AlbertHeijnApiError as err:
+        raise intent.IntentHandleError(f"Kon {title} niet op de lijst zetten: {err}") from err
+    if already:
+        return f"{title} staat al op de lijst ({already})."
+    return f"{quantity} keer {title} op de lijst gezet." if quantity > 1 else f"{title} op de lijst gezet."
+
+
+class AddToListIntentHandler(intent.IntentHandler):
+    """Put a product on the AH shopping list by name; asks which one when it is not clear."""
+
+    intent_type = INTENT_ADD_TO_LIST
+    slot_schema = {"product": intent.non_empty_string}
+
+    async def async_handle(self, intent_obj: intent.Intent) -> intent.IntentResponse:
+        """Handle the intent."""
+        slots = self.async_validate_slots(intent_obj.slots)
+        quantity, query = _split_quantity(slots["product"]["value"])
+        coordinator = _get_coordinator(intent_obj.hass)
+        response = intent_obj.create_response()
+
+        known = coordinator.history.frequent(5000) if coordinator.history else []
+        options, clear = match_products(known, query)
+        where = "eerder gekocht"
+        if not options:
+            # never bought: AH's search results, always as a choice
+            try:
+                found = await coordinator.api.search_products(query, 3)
+            except AlbertHeijnApiError as err:
+                raise intent.IntentHandleError(f"Kon niet zoeken naar {query}: {err}") from err
+            options = [{"product_id": p.id, "title": p.title, "unit_size": p.unit_size} for p in found if p.id]
+            clear, where = False, "bij AH"
+        if not options:
+            response.async_set_speech(f"Ik kan {query} niet vinden bij Albert Heijn.")
+            return response
+        if clear:
+            response.async_set_speech(await _put_on_list(coordinator, options[0], quantity))
+            return response
+
+        _choices.update({"at": time.monotonic(), "options": options, "quantity": quantity})
+        listed = "; ".join(f"{n}: {_label(p)}" for n, p in enumerate(options, 1))
+        say = " of ".join(f"nummer {n}" for n in range(1, len(options) + 1))
+        response.async_set_speech(f"Welke {query} bedoel je ({where})? {listed}. Zeg {say}.")
+        return response
+
+
+class PickChoiceIntentHandler(intent.IntentHandler):
+    """The answer to the question of AddToListIntentHandler: "nummer 2"."""
+
+    intent_type = INTENT_PICK_CHOICE
+    slot_schema = {"keuze": intent.non_empty_string}
+
+    async def async_handle(self, intent_obj: intent.Intent) -> intent.IntentResponse:
+        """Handle the intent."""
+        slots = self.async_validate_slots(intent_obj.slots)
+        response = intent_obj.create_response()
+        if not _choices or time.monotonic() - _choices["at"] > CHOICE_SECONDS:
+            response.async_set_speech("Ik weet niet meer waar je uit kiest. Zeg opnieuw welk product op de lijst moet.")
+            return response
+        raw = str(slots["keuze"]["value"]).strip().lower()
+        digits = re.sub(r"[^0-9]", "", raw)
+        n = int(digits) if digits else _NUMBERS.get(raw, 0)
+        options = _choices["options"]
+        if not 1 <= n <= len(options):
+            response.async_set_speech(f"Kies een nummer van 1 tot {len(options)}.")
+            return response
+        choice, quantity = options[n - 1], _choices["quantity"]
+        _choices.clear()
+        response.async_set_speech(await _put_on_list(_get_coordinator(intent_obj.hass), choice, quantity))
         return response

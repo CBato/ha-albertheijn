@@ -39,7 +39,7 @@ analysis services were added in this fork.
 | Suggestions | Due products and good bonus deals put on the AH shopping list automatically, with the reason why |
 | Analysis | Spending per month and week, biggest items, categories, bonus savings, price movers, a product overview |
 | Barcode | Barcode (EAN) to AH product, for scanning what has run out |
-| Assist | Order status and changing the order by voice (Dutch and English) |
+| Assist | "Zet melk op de lijst" (asks which one when in doubt), order status and changing the order by voice |
 
 The AH shopping list itself (add, tick off, the basket in the AH app) is not part of this integration. Use
 [Appie-Dashboard](https://github.com/eejeha/Appie-Dashboard) for that. It exposes the list as a todo entity, and
@@ -72,6 +72,19 @@ home network it works with the local IP address.
 
 HACS does not install the sentences. Copy `custom_sentences/nl/albert_heijn.yaml` (and/or `en`) to
 `/config/custom_sentences/<language>/` and restart.
+
+Dutch, shopping list (fork):
+
+| You say | What happens |
+|---|---|
+| "zet melk op de lijst", "zet 2 melk op de boodschappenlijst", "we hebben geen eieren meer" | Looks in what you bought before. One clear match (or one you buy much more often than the others): it goes on the AH shopping list. Otherwise Assist names up to four products with a number |
+| "nummer 2", "de tweede" | Picks from that list (within 3 minutes) |
+
+Products you never bought are searched at AH, and the top three are offered as a choice. A product that is already
+on the list is not added twice.
+
+Orders (from the original integration): "wat zit er in mijn bestelling", "wanneer wordt mijn bestelling bezorgd",
+"voeg product code 553353 toe aan mijn bestelling".
 
 ## How it works
 
@@ -282,7 +295,7 @@ custom_components/albert_heijn/
   db.py            SQLite schema and queries (blocking, always run in the executor)
   sensor.py        sensors
   services.py      services (schemas in services.yaml)
-  intents.py       Assist intents (sentences in /custom_sentences)
+  intents.py       Assist intents, incl. "zet ... op de lijst" (sentences in /custom_sentences)
   www/             Lovelace card albert-heijn-orders-card, copied to /config/www/community/albert_heijn
 tests/             offline tests (no Home Assistant needed)
 scripts/           live scripts against the real AH API (login, fetch orders)

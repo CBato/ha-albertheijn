@@ -10,6 +10,7 @@ import math
 import re
 from statistics import median
 from typing import Any
+import unicodedata
 
 REGULAR_DAYS = 90  # compare a bonus with the normal price of the last 90 days
 MIN_REGULAR_POINTS = 3  # at least 3 weekly normal prices before we judge a bonus
@@ -246,3 +247,49 @@ def order_effective_prices(items: list[dict[str, Any]]) -> dict[int, float | Non
             if base and unit is not None:
                 out[i["product_id"]] = round(base - share * (base - unit), 3)
     return out
+
+
+# words that say nothing about which product you mean ("zet een pak melk op de lijst")
+_FILLER = {"de", "het", "een", "wat", "nog", "paar", "pak", "pakje", "pakken", "fles", "flessen", "zak", "zakje",
+           "ah", "albert", "heijn", "van", "en", "met"}
+
+
+def _plain(text: str) -> str:
+    """Lowercase, no accents, only letters, digits and spaces ("Crème fraîche" -> "creme fraiche")."""
+    t = unicodedata.normalize("NFKD", text or "")
+    t = "".join(c for c in t if not unicodedata.combining(c)).lower()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", t).split())
+
+
+def _stem(word: str) -> str:
+    """Rough Dutch plural to singular, so "eieren" finds "ei" and "bananen" finds "banaan" (via "banan")."""
+    for suffix in ("eren", "en", "s"):
+        if len(word) > len(suffix) + 2 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def match_products(products: list[dict[str, Any]], query: str, limit: int = 4) -> tuple[list[dict[str, Any]], bool]:
+    """Products whose title (and brand) contain every word you said, best first, and whether the choice is clear.
+
+    `products` are rows from compute_frequent (bought products with a score, then "Eerder gekocht" with score 0).
+    Words match at the start of a word in the title; only when that finds nothing, anywhere in a word.
+    Clear: only one bought product matches, or the best one is bought regularly (3+ times) and scores at least twice
+    as high as the next one, or nothing was bought and exactly one "Eerder gekocht" product matches.
+    """
+    words = [_stem(w) for w in _plain(query).split() if w not in _FILLER]
+    if not words:
+        return [], False
+    texts = [(p, " " + _plain(f"{p.get('title') or ''} {p.get('brand') or ''}")) for p in products if p.get("product_id")]
+    # each word at the start of a word ("volle" is not "halfvolle"); only if that finds nothing, anywhere ("karnemelk")
+    hits = [p for p, text in texts if all(" " + w in text for w in words)] or [p for p, text in texts if all(w in text for w in words)]
+    hits.sort(key=lambda p: (-(p.get("score") or 0), -(p.get("count") or 0), len(p.get("title") or "")))
+    bought = [p for p in hits if p.get("count")]
+    if len(bought) == 1:
+        clear = True
+    elif bought:
+        top, second = bought[0], bought[1]
+        clear = (top.get("count") or 0) >= 3 and (top.get("score") or 0) >= 2 * (second.get("score") or 0)
+    else:
+        clear = len(hits) == 1
+    return hits[:limit], clear

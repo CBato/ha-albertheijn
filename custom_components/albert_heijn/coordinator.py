@@ -174,6 +174,15 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
         self.async_update_listeners()
         return result
 
+    async def async_add_to_list(self, product_id: int, title: str, quantity: int = 1) -> int | None:
+        """Put a product on the AH shopping list. Returns the quantity already on the list (then nothing changes)."""
+        on_list = {i["product_id"]: i for i in await self.api.get_shopping_list() if i.get("product_id")}
+        if (item := on_list.get(product_id)) and not item["checked"]:
+            return item["quantity"]
+        await self.api.set_list_items([{"product_id": product_id, "title": title, "quantity": quantity}])
+        self._update_tokens()
+        return None
+
     async def async_cleanup_suggestions(self, days: int = 14, dry_run: bool = False, snooze_days: int = 7) -> dict:
         """Remove suggestions that were left on the list (see history.async_cleanup_suggestions)."""
         if not self.history:
