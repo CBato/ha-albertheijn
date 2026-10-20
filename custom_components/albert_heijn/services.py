@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import logging
+from typing import Any
 
 import voluptuous as vol
 
@@ -28,6 +29,29 @@ SERVICE_SYNC_HISTORY = "sync_history"
 SERVICE_GET_PRICE_HISTORY = "get_price_history"
 SERVICE_FILL_LIST = "fill_list"
 SERVICE_GRAPHQL_QUERY = "graphql_query"
+SERVICE_PROBE_ORDER_HISTORY = "probe_order_history"
+
+# Variants to find out how far back AH returns delivered orders (introspection is disabled at AH)
+_PROBE_GRAPHQL = {
+    "closed": "orderFulfillments(status: CLOSED)",
+    "closed_pagination": "orderFulfillments(status: CLOSED, pagination: {offset: 0, limit: 100})",
+    "closed_pagination_offset6": "orderFulfillments(status: CLOSED, pagination: {offset: 6, limit: 100})",
+    "closed_offset_limit": "orderFulfillments(status: CLOSED, offset: 0, limit: 100)",
+    "closed_page_size": "orderFulfillments(status: CLOSED, page: 0, size: 100)",
+    "closed_limit": "orderFulfillments(status: CLOSED, limit: 100)",
+    "closed_first": "orderFulfillments(status: CLOSED, first: 100)",
+    "no_status": "orderFulfillments",
+    "cancelled": "orderFulfillments(status: CANCELLED)",
+    "all": "orderFulfillments(status: ALL)",
+}
+_PROBE_REST = [
+    "/mobile-services/order/v1/summaries/complete?sortBy=DEFAULT",
+    "/mobile-services/order/v1/summaries?sortBy=DEFAULT",
+    "/mobile-services/order/v1/summaries/closed?sortBy=DEFAULT",
+    "/mobile-services/order/v1/summaries/history?sortBy=DEFAULT",
+    "/mobile-services/order/v1/history",
+    "/mobile-services/order/v2/summaries?sortBy=DEFAULT",
+]
 
 ATTR_QUERY = "query"
 ATTR_PRODUCT_ID = "product_id"
@@ -209,6 +233,37 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             "products": history.frequent(call.data[ATTR_LIMIT], call.data[ATTR_INCLUDE_CATALOG]),
         }
 
+    async def handle_probe_order_history(call: ServiceCall) -> ServiceResponse:
+        """Try ways to get older delivered orders; per variant: count + date range, or the error message."""
+        coordinator = _get_coordinator(hass)
+        api = coordinator.api
+        out: dict[str, Any] = {}
+        for name, field in _PROBE_GRAPHQL.items():
+            query = f"query Probe {{ {field} {{ result {{ orderId statusCode statusDescription delivery {{ slot {{ date }} }} }} }} }}"
+            try:
+                data = await api._graphql(query)
+                rows = ((data or {}).get("orderFulfillments") or {}).get("result") or []
+                dates = sorted(((r.get("delivery") or {}).get("slot") or {}).get("date") or "" for r in rows)
+                statuses = sorted({str(r.get("statusDescription") or r.get("statusCode")) for r in rows})
+                out[name] = {"ok": True, "orders": len(rows), "from": dates[0] if dates else None,
+                             "to": dates[-1] if dates else None, "statuses": statuses}
+            except AlbertHeijnApiError as err:
+                out[name] = {"ok": False, "error": str(err)[:300]}
+        for path in _PROBE_REST:
+            try:
+                data = await api._request("GET", path)
+                if isinstance(data, list):
+                    info: Any = {"list": len(data), "first": str(data[0])[:300] if data else None}
+                elif isinstance(data, dict):
+                    info = {k: (len(v) if isinstance(v, list) else str(v)[:80]) for k, v in data.items()}
+                else:
+                    info = str(data)[:200]
+                out[path] = {"ok": True, "data": info}
+            except AlbertHeijnApiError as err:
+                out[path] = {"ok": False, "error": str(err)[:200]}
+        coordinator._update_tokens()
+        return out
+
     async def handle_graphql_query(call: ServiceCall) -> ServiceResponse:
         """Run a read-only GraphQL query against the AH API (to explore what it offers)."""
         coordinator = _get_coordinator(hass)
@@ -300,6 +355,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_PROBE_ORDER_HISTORY,
+        handle_probe_order_history,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_GRAPHQL_QUERY,
         handle_graphql_query,
         schema=GRAPHQL_QUERY_SCHEMA,
@@ -345,5 +407,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_GET_PRICE_HISTORY,
         SERVICE_FILL_LIST,
         SERVICE_GRAPHQL_QUERY,
+        SERVICE_PROBE_ORDER_HISTORY,
     ):
         hass.services.async_remove(DOMAIN, service)

@@ -219,3 +219,9 @@ graphql_query:
       required: false
       selector:
         object:
+
+probe_order_history:
+  name: Probe order history
+  description: >-
+    Try several ways to get older delivered orders from AH (pagination, statuses, REST paths) and report per variant
+    how many orders and which period, or the error. Read-only.
