@@ -599,3 +599,28 @@ def products_overview(path: str) -> list[dict[str, Any]]:
         })
     out.sort(key=lambda r: r["last_bought"] or "", reverse=True)
     return out
+
+
+def fill_product_details(path: str, rows: list[dict[str, Any]], now: str) -> int:
+    """Fill in missing title, brand, size, category and image (never overwrite what is already known)."""
+    n = 0
+    with closing(_connect(path)) as con, con:
+        for r in rows:
+            if not r.get("product_id"):
+                continue
+            con.execute("INSERT OR IGNORE INTO products(product_id, in_catalog, updated) VALUES(?, 0, ?)", (r["product_id"], now))
+            cur = con.execute(
+                """UPDATE products SET
+                     title = CASE WHEN title IS NULL OR title = '' OR title LIKE 'Product %' THEN NULLIF(?, '') ELSE title END,
+                     brand = COALESCE(NULLIF(brand, ''), NULLIF(?, '')),
+                     unit_size = COALESCE(NULLIF(unit_size, ''), NULLIF(?, '')),
+                     category = COALESCE(NULLIF(category, ''), NULLIF(?, '')),
+                     image_url = COALESCE(image_url, ?),
+                     updated = ?
+                   WHERE product_id = ? AND (title IS NULL OR title = '' OR title LIKE 'Product %' OR brand IS NULL OR brand = ''
+                     OR unit_size IS NULL OR unit_size = '' OR category IS NULL OR category = '' OR image_url IS NULL)""",
+                (r.get("title") or "", r.get("brand") or "", r.get("unit_size") or "", r.get("category") or "",
+                 r.get("image_url"), now, r["product_id"]),
+            )
+            n += cur.rowcount
+    return n

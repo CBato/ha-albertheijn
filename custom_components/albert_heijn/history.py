@@ -485,6 +485,7 @@ class OrderHistory:
 
     async def _fetch_prices(self, today: str) -> tuple[int, str | None]:
         ids = [int(p["product_id"]) for p in self._frequent[:PRICE_MAX_PRODUCTS] if p.get("product_id")]
+        ids = list(dict.fromkeys(ids))
         got = 0
         for i in range(0, len(ids), PRICE_BATCH):
             try:
@@ -495,5 +496,6 @@ class OrderHistory:
             for r in rows:
                 r["effective"] = effective_price(r.get("bonus"), r.get("price"), r.get("price_before_bonus"))
             got += await self._run(db.save_prices, today, rows)
+            await self._run(db.fill_product_details, rows, _now())
             await asyncio.sleep(REQUEST_PAUSE)
         return got, None

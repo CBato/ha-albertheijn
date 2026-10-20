@@ -572,6 +572,12 @@ class AlbertHeijnApi:
                 "price_before_bonus": p.get("priceBeforeBonus"),
                 "bonus": (p.get("bonusMechanism") or "Bonus") if p.get("isBonus") else None,
                 "unit_price": p.get("unitPriceDescription"),
+                # product details (to fill in products we only know from a till receipt)
+                "title": p.get("title") or "",
+                "brand": p.get("brand") or "",
+                "unit_size": p.get("salesUnitSize") or "",
+                "category": "/".join(c for c in (p.get("mainCategory"), p.get("subCategory")) if c),
+                "image_url": _image_url(p),
             }
             for p in rows
             if isinstance(p, dict) and p.get("webshopId")
