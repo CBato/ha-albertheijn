@@ -9,6 +9,11 @@ from __future__ import annotations
 from contextlib import closing
 import json
 import sqlite3
+
+try:
+    from .suggest import order_effective_prices
+except ImportError:  # standalone use
+    from suggest import order_effective_prices  # type: ignore[no-redef]
 from typing import Any
 
 SCHEMA = """
@@ -30,6 +35,7 @@ CREATE TABLE IF NOT EXISTS order_items (
     price_before_bonus REAL,
     bonus TEXT,                     -- bonus mechanism when the item was in the bonus, e.g. '1+1 gratis'
     unit_price TEXT,                -- e.g. '€ 1,50 per liter'
+    effective REAL,                 -- really paid per item (multi-buy offers settled, see suggest.order_effective_prices)
     PRIMARY KEY (order_id, product_id)
 );
 CREATE TABLE IF NOT EXISTS products (
@@ -87,6 +93,17 @@ CREATE INDEX IF NOT EXISTS idx_orders_status_date ON orders(status, date);
 """
 
 
+def _recompute_effective(con: sqlite3.Connection) -> None:
+    """Fill order_items.effective for orders stored before the column existed."""
+    rows = [dict(r) for r in con.execute("SELECT order_id, product_id, quantity, price, price_before_bonus, bonus FROM order_items")]
+    by_order: dict[int, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_order.setdefault(r["order_id"], []).append(r)
+    for order_id, items in by_order.items():
+        for pid, eff in order_effective_prices(items).items():
+            con.execute("UPDATE order_items SET effective = ? WHERE order_id = ? AND product_id = ?", (eff, order_id, pid))
+
+
 def _connect(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(path, timeout=30)
     con.row_factory = sqlite3.Row
@@ -102,6 +119,10 @@ def init(path: str) -> None:
         cols = {r["name"] for r in con.execute("PRAGMA table_info(prices)")}
         if "effective" not in cols:
             con.execute("ALTER TABLE prices ADD COLUMN effective REAL")
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(order_items)")}
+        if "effective" not in cols:
+            con.execute("ALTER TABLE order_items ADD COLUMN effective REAL")
+            _recompute_effective(con)
 
 
 def get_meta(path: str) -> dict[str, str]:
@@ -167,12 +188,14 @@ def save_order(path: str, order_id: int, day: str, status: str, items: list[dict
             (order_id, day, status, now),
         )
         con.execute("DELETE FROM order_items WHERE order_id = ?", (order_id,))
+        paid = order_effective_prices([{**i, "product_id": pid} for pid, i in merged.items()])
         for pid, i in merged.items():
             _upsert_product(con, i, now)
             con.execute(
-                """INSERT INTO order_items(order_id, product_id, quantity, price, price_before_bonus, bonus, unit_price)
-                   VALUES(?, ?, ?, ?, ?, ?, ?)""",
-                (order_id, pid, i["quantity"], i.get("price"), i.get("price_before_bonus"), i.get("bonus"), i.get("unit_price")),
+                """INSERT INTO order_items(order_id, product_id, quantity, price, price_before_bonus, bonus, unit_price, effective)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+                (order_id, pid, i["quantity"], i.get("price"), i.get("price_before_bonus"), i.get("bonus"), i.get("unit_price"),
+                 paid.get(pid)),
             )
         return True
 
@@ -371,11 +394,13 @@ def product_history(path: str, product_id: int) -> dict[str, Any]:
             (product_id,),
         ).fetchone()
         purchases = [
-            {"date": r["date"], "source": "bezorging", "quantity": r["quantity"], "price": r["price"],
+            {"date": r["date"], "source": "bezorging", "quantity": r["quantity"],
+             "price": r["effective"] if r["effective"] is not None else r["price"], "price_list": r["price"],
              "price_before_bonus": r["price_before_bonus"], "bonus": r["bonus"],
-             "amount": round((r["price"] or 0) * (r["quantity"] or 0), 2) if r["price"] is not None else None}
+             "amount": round((r["effective"] if r["effective"] is not None else r["price"]) * (r["quantity"] or 0), 2)
+             if r["price"] is not None else None}
             for r in con.execute(
-                """SELECT o.date, i.quantity, i.price, i.price_before_bonus, i.bonus FROM order_items i
+                """SELECT o.date, i.quantity, i.price, i.price_before_bonus, i.bonus, i.effective FROM order_items i
                    JOIN orders o ON o.order_id = i.order_id WHERE i.product_id = ? AND o.status = 'delivered'""",
                 (product_id,),
             )

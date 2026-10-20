@@ -205,3 +205,31 @@ def compute_suggestions(
     for s in out:
         s.pop("_prio")
     return out[:max_items]
+
+
+def order_effective_prices(items: list[dict[str, Any]]) -> dict[int, float | None]:
+    """What was really paid per item in one order, by product_id.
+
+    AH lists multi-buy offers ("3 voor 5,00", "1+1 gratis", "2e halve prijs") at the normal price per item and settles
+    the discount on the order total, for full groups only, and usually across all products with the same offer
+    (mix & match). Discounts that AH already puts in the price (% korting, "VOOR 2.49") are left as they are.
+    """
+    by_offer: dict[str, list[dict[str, Any]]] = {}
+    for i in items:
+        if i.get("bonus") and (parse_promo(i["bonus"]) or {}).get("group", 1) > 1:
+            by_offer.setdefault(" ".join(i["bonus"].lower().split()), []).append(i)
+    out: dict[int, float | None] = {i["product_id"]: i.get("price") for i in items if i.get("product_id")}
+    for group_items in by_offer.values():
+        promo = parse_promo(group_items[0]["bonus"]) or {}
+        size = int(promo.get("group") or 1)
+        total = sum(int(i.get("quantity") or 1) for i in group_items)
+        full = (total // size) * size  # items in complete groups
+        if not full:
+            continue  # group not complete: no discount
+        share = full / total
+        for i in group_items:
+            base = i.get("price_before_bonus") or i.get("price")
+            unit = effective_price(i["bonus"], i.get("price"), base)
+            if base and unit is not None:
+                out[i["product_id"]] = round(base - share * (base - unit), 3)
+    return out
