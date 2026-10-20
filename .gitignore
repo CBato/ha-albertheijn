@@ -29,3 +29,6 @@ Thumbs.db
 
 # Test output
 *.log
+
+# Test databases
+tests/tmp*/

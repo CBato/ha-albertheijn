@@ -1,8 +1,7 @@
 import os
 import sqlite3
-import tempfile
 
-import _harness  # noqa: F401 (sets up the Home Assistant stubs)
+from _harness import tmp  # sets up the Home Assistant stubs
 
 import importlib
 suggest = importlib.import_module("albert_heijn.suggest")
@@ -29,7 +28,7 @@ print("5 in 3-voor-5:", suggest.order_effective_prices(five))
 assert suggest.order_effective_prices(five)[1] == round(2.29 - 0.6 * (2.29 - 5 / 3), 3)
 
 # migration: old database without order_items.effective gets the column and the values
-path = os.path.join(tempfile.mkdtemp(dir=os.path.dirname(os.path.abspath(__file__))), "old.db")
+path = os.path.join(tmp, "old.db")
 con = sqlite3.connect(path)
 con.executescript("""CREATE TABLE orders (order_id INTEGER PRIMARY KEY, date TEXT NOT NULL, status TEXT NOT NULL, updated TEXT);
 CREATE TABLE order_items (order_id INTEGER NOT NULL, product_id INTEGER NOT NULL, quantity INTEGER NOT NULL, price REAL,
