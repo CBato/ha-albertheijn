@@ -169,7 +169,8 @@ class OrderHistory:
         self._api = api
         self._entry_id = entry_id
         self._path = hass.config.path(DB_FILE)
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()  # one sync at a time
+        self._list_lock = asyncio.Lock()  # one change of the shopping list at a time (fill / cleanup)
         self.meta: dict[str, str] = {}
         self.summary: dict[str, Any] = {}
         self._frequent: list[dict[str, Any]] = []
@@ -298,9 +299,6 @@ class OrderHistory:
         await self._refresh_cache()
         return until
 
-    async def async_price_history(self, product_id: int) -> list[dict[str, Any]]:
-        return await self._run(db.price_history, product_id)
-
     async def async_fill_list(
         self,
         open_orders: list[Fulfillment],
@@ -312,6 +310,13 @@ class OrderHistory:
         max_items: int = 25,
     ) -> dict[str, Any]:
         """Put this week's suggestions (rhythm + bonus) on the AH shopping list, and remember why."""
+        async with self._list_lock:
+            return await self._fill_list(open_orders, in_order, week, dry_run, min_count, min_share, max_items)
+
+    async def _fill_list(
+        self, open_orders: list[Fulfillment], in_order: set[int], week: str, dry_run: bool,
+        min_count: int, min_share: float, max_items: int,
+    ) -> dict[str, Any]:
         today = date.today()
         # bonus information must be from this bonus week
         if (self.meta.get("prices_at") or "")[:10] < week_start(today).isoformat():
@@ -352,6 +357,10 @@ class OrderHistory:
         straight back; after that it is suggested again if it is still due.
         Compared by date, so the Monday run cleans what the Monday fill of two weeks ago added.
         """
+        async with self._list_lock:
+            return await self._cleanup_suggestions(in_order, days, dry_run, snooze_days)
+
+    async def _cleanup_suggestions(self, in_order: set[int], days: int, dry_run: bool, snooze_days: int) -> dict[str, Any]:
         today = date.today()
         cutoff = (today - timedelta(days=days)).isoformat()
         stale = await self._run(db.stale_suggestions, cutoff)

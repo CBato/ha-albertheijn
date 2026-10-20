@@ -1,6 +1,6 @@
 """Test script for Albert Heijn authentication.
 
-Run: python test_login.py
+Run from the repository root: python scripts/live_login.py
 Tests the browser-based login flow via local reverse proxy.
 Opens your browser to the AH login page, captures the auth code.
 """

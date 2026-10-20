@@ -1,8 +1,8 @@
 """Test script for Albert Heijn API - order fetching.
 
-Run: python test_api.py
+Run from the repository root: python scripts/live_api.py
 
-Requires tokens from test_login.py (stored in .tokens.json),
+Requires tokens from scripts/live_login.py (stored in .tokens.json),
 or pass --login to authenticate first.
 """
 

@@ -1,178 +1,333 @@
-# Albert Heijn Integration for Home Assistant
+# Albert Heijn for Home Assistant (CBato fork)
 
 [![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz/)
 
-A Home Assistant custom integration for Albert Heijn grocery delivery, providing order tracking sensors and voice control through Assist.
+A Home Assistant integration for Albert Heijn grocery delivery. It shows your upcoming deliveries and can change
+them, and it keeps a local history of everything you buy. That history drives the suggestions for your shopping
+list: what is due again according to how often you buy it, and what is in a bonus that is really cheaper than
+what you normally pay.
 
-## This fork (CBato, 0.18.0)
+This is a fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn). The order sensors, the
+order services, the login and Assist come from there. The order history, the suggestions, the bonus check and the
+analysis services were added in this fork.
 
-Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) with:
+> Albert Heijn has no public API. This integration uses the API of the AH app, which can change without notice.
 
-- **Order history in SQLite** — `/config/albert_heijn.db` (part of HA backups) with the tables `orders`,
-  `order_items` (quantity, price, price without bonus, bonus, unit price), `products` (incl. AH's "Eerder gekocht"
-  as `in_catalog`) and `prices` (weekly). The history keeps growing even when AH stops returning old orders.
-  Synced shortly after start, once a day and after each delivery; catalog and prices once a week.
-  Cancelled orders are skipped (and removed if they were stored before). Older orders come from the "Mijn bestellingen"
-  list (`/order/v1/summaries`: the last 25 orders, as in the AH app, ~4 months; AH ignores paging), which goes back
-  further than `orderFulfillments` (max 10). Only state DELIVERED counts. The database keeps everything from then on.
-  A JSON history from 0.6/0.7 is imported once. `order_items.effective` is what was really paid per item: AH lists
-  multi-buy offers (3 voor 5,00, 1+1 gratis, 2e halve prijs) at the normal price and settles them on the order total,
-  for complete groups and across products with the same offer (mix & match).
-- **`sensor.albert_heijn_vaak_besteld`** — number of products in the history, with the top 25
-  (count, last ordered, average interval) as attribute.
-- **`albert_heijn.get_frequent_items`** — up to 1000 products, most often and recently ordered first,
-  followed by the rest of "Eerder gekocht".
-- **`albert_heijn.fill_list`** — puts this week's suggestions on the AH shopping list (= the basket in the AH app)
-  with the usual quantity: products due according to the order rhythm, and regularly bought products in a bonus
-  that is a real discount (the price before the bonus is compared with the normal price of the last 90 days).
-  `sensor.albert_heijn_voorstellen` lists what was added this week and why. `dry_run: true` only shows them.
-- **Bonus mechanisms understood** — 1+1 / 2+1 gratis, 2e halve prijs, 2e gratis, "2 voor 5,00", % and € korting give an
-  effective price per item. The bonus check compares that with what you really paid per item on average (the same
-  comparison as a product table in a dashboard); without purchase history with the normal price of the last 90 days. `fill_list` rounds quantities up to the bonus and stocks up on a real saving of 20%+
-  (about 2 weeks, fresh products 1 week); the reason says how many and why.
-- **Stock-based rhythm** — a product is due when the last purchase (quantity / use per week) runs out before the delivery
-  after the next one, so a bonus stock-up is taken into account.
-- **Till receipts** (in-store purchases with the bonus card) are imported too (tables `receipts`, `receipt_items`,
-  `pos_map`): till product ids are converted to webshop products, so store purchases count in the rhythm.
-  A receipt on the day of a delivery is not counted twice. The first sync imports up to 400 receipts.
-- **Pause-proof rhythm** — after a pause (nothing bought for more than twice the usual interval, e.g. an AH outage)
-  "due" is judged as if one usual interval has passed. Rhythm (`share`, `every_weeks`, `per_week`) is counted over the
-  weeks we have data for (a delivery or a receipt), so gaps in the data don't make products look rarer than they are.
-  The rhythm is taken from the period with known deliveries (receipts alone miss the deliveries) and measured over the
-  active period (first to last purchase). Products not bought for 3 usual intervals (6 weeks at least) are `stopped`
-  and never suggested.
-- **`albert_heijn.graphql_query`** — read-only GraphQL query, to explore the AH API (introspection is disabled at AH).
-- **`albert_heijn.probe_order_history`** — tries pagination/status/REST variants to find older delivered orders.
-- **`albert_heijn.get_product_history`** — one product: every purchase (delivery and store, with price per item),
-  weekly prices, rhythm and totals (for a product card in a dashboard).
-- **`albert_heijn.get_insights`** — spending this month and last month, per week (delivery / store), biggest items and
-  categories (90 days), bonus savings and price movers (weekly prices, or paid list prices until there are enough).
-- **`albert_heijn.get_products`** — every product ever bought: last bought, times, average paid, current price and bonus,
-  difference current vs average paid (for a product table with category filter).
-- **Bonus weeks** — this week's and (once AH publishes it, a few days ahead) next week's bonus on what you bought before
-  and your personal bonus are stored (`bonus_weeks`, `bonus_offers`). `albert_heijn.get_bonus` (week: current / next)
-  returns them with the deal against what you paid on average; `sensor.albert_heijn_bonus_volgende_week` counts the
-  good deals next week.
-- **`albert_heijn.snooze_product`** — don't suggest a product for a while (days), never again (-1) or again (0);
-  shared for everyone and respected by `fill_list`.
-- **`albert_heijn.sync_history`** — sync now; reports whether AH supports closed orders.
-- **`albert_heijn.lookup_barcode`** — barcode (EAN) → AH product.
-- **`albert_heijn.add_to_order`** — also works for a submitted (planned) order: it is reopened first and has to be
-  confirmed again in the AH app. Accepts several `products` at once and an optional `order_id`.
-- **Next order items** sensor now lists the products in the next order (`products` attribute).
-- **Order rhythm** per product in `get_frequent_items`: `usual_qty` (usually per order), `every_weeks`,
-  `share` (part of the orders since it was first ordered), `per_week` (average quantity per week) and `due`.
-  The sensor lists what is due again (`due` attribute).
-- **Weekly price check** of all products you buy or bought before (price, price without bonus, bonus, unit price), and the
-  price paid per order; `albert_heijn.get_price_history` returns them per product. Basis for a price watch and
-  for checking whether a bonus is a real discount.
+## Contents
 
-## Features
+- [What you get](#what-you-get)
+- [Installation](#installation)
+- [How it works](#how-it-works)
+- [Suggestions](#suggestions)
+- [Sensors](#sensors)
+- [Services](#services)
+- [Example automations](#example-automations)
+- [Database](#database)
+- [Development](#development)
+- [Limits and known issues](#limits-and-known-issues)
 
-### Sensors
-- **Next delivery date** — when your next order arrives
-- **Next delivery time** — delivery time window (e.g., "18:00 - 20:00")
-- **Next order total** — total price of the upcoming order
-- **Next order status** — current status description
-- **Next order edit deadline** — the last moment you can modify your order (timestamp sensor, great for automations!)
-- **Next order modifiable** — whether the order can still be changed
-- **Next order items** — number of products in the order
-- **Minimum order value** — subscription minimum (with `remaining_to_minimum` attribute)
-- **Order submittable** — whether the order meets the minimum value
-- **Open orders** — total number of pending deliveries
+## What you get
 
-### Services
-- `albert_heijn.search_products` — search for products
-- `albert_heijn.add_to_order` — add a product by ID
-- `albert_heijn.add_product_by_name` — search and add the first match
-- `albert_heijn.reopen_order` — reopen a submitted order for editing
-- `albert_heijn.revert_order` — revert a reopened order
+| Area | What |
+|---|---|
+| Upcoming delivery | Date, time window, total, status, edit deadline, products in the order, minimum order value |
+| Change orders | Add or remove products, reopen and revert a submitted order |
+| Purchase history | Delivered orders and till receipts (in-store purchases with the bonus card) in a local SQLite database that keeps growing |
+| Rhythm per product | How often, how many, use per week, and whether it is due again |
+| Prices | Weekly price of every product you buy, and what you really paid (multi-buy offers settled) |
+| Bonus | This week's and next week's bonus on what you buy, judged against what you paid on average |
+| Suggestions | Due products and good bonus deals put on the AH shopping list automatically, with the reason why |
+| Analysis | Spending per month and week, biggest items, categories, bonus savings, price movers, a product overview |
+| Barcode | Barcode (EAN) to AH product, for scanning what has run out |
+| Assist | Order status and changing the order by voice (Dutch and English) |
 
-### Voice Control (Assist)
-Works with Home Assistant's built-in Assist in both Dutch and English:
-
-**Dutch:**
-- "Voeg melk toe aan mijn bestelling"
-- "Bestel 2 brood"
-- "Wanneer wordt mijn bestelling bezorgd?"
-
-**English:**
-- "Add milk to my order"
-- "Order 2 bread"
-- "When will my groceries be delivered?"
+The AH shopping list itself (add, tick off, the basket in the AH app) is not part of this integration. Use
+[Appie-Dashboard](https://github.com/eejeha/Appie-Dashboard) for that. It exposes the list as a todo entity, and
+`fill_list` writes to the same AH list.
 
 ## Installation
 
-### HACS (Recommended)
-1. Add this repository as a custom repository in HACS
-2. Search for "Albert Heijn" and install
-3. Restart Home Assistant
+### HACS
 
-### Manual
-1. Copy the `custom_components/albert_heijn` folder to your HA `custom_components/` directory
-2. Restart Home Assistant
+1. HACS → Integrations → menu → **Custom repositories** → add `https://github.com/CBato/ha-albertheijn`
+   (type: Integration).
+2. Install **Albert Heijn** and restart Home Assistant.
+3. To update later: HACS → Albert Heijn → **Update information**, then **Redownload**, then restart.
 
-## Configuration
+If you used dpvdberg's version before, remove it in HACS first. The domain is the same (`albert_heijn`), so your
+config entry and entities are kept.
 
-### Setup in Home Assistant
-1. Go to **Settings → Devices & Services → Add Integration**
-2. Search for "Albert Heijn"
-3. Enter your Albert Heijn email and password
-4. The integration will log in, obtain tokens, and set up sensors
+### Log in
 
-Tokens are automatically stored, refreshed, and re-created using your stored credentials if they expire.
+1. **Settings → Devices & services → Add integration → Albert Heijn**.
+2. Click submit. A login page opens in your browser through a small proxy that Home Assistant starts. Log in with
+   your AH account there.
+3. The integration receives the tokens and refreshes them by itself. When that is no longer possible, Home Assistant
+   asks you to log in again (reauth).
 
-### Requirements
+The proxy runs on a random port of your Home Assistant host, and the browser has to be able to reach it. On your
+home network it works with the local IP address.
 
-The integration uses [`curl_cffi`](https://github.com/yifeikong/curl_cffi) to impersonate a Chrome browser during login (helps bypass TLS fingerprinting and reduces captcha triggers). This is installed automatically as a dependency.
+### Assist sentences (optional)
 
-If the automated login is blocked by hCaptcha, you can alternatively obtain tokens via the [appie CLI tool](appie-go/) and store them manually.
+HACS does not install the sentences. Copy `custom_sentences/nl/albert_heijn.yaml` (and/or `en`) to
+`/config/custom_sentences/<language>/` and restart.
 
-## Automation Examples
+## How it works
 
-### Notify before order deadline
+### What is fetched when
+
+| What | When | Incremental |
+|---|---|---|
+| Upcoming orders, details, products in the next order | Every 5 minutes | Always current |
+| Delivered orders | Every night at 04:15, after a restart, and right after a delivery | Only orders not yet stored |
+| Till receipts | Same | Stops at the first receipt it already has |
+| AH's "Eerder gekocht" list | Once a week | Whole list (it changes) |
+| Prices of everything you buy | Once a week (and on Monday before `fill_list`) | Whole list (that is the measurement) |
+| Bonus this week and next week | Once a day (the first sync of the day) | Per week |
+
+There is one sync at a time. Each step that fails is skipped and reported in `last_error` on the "Vaak besteld"
+sensor; the rest of the sync continues.
+
+### Sources and how far back
+
+- **Deliveries:** AH returns at most the last 25 orders ("Mijn bestellingen", about 4 months), and paging is
+  ignored. Older deliveries cannot be fetched. Everything fetched stays in the database, so the history grows
+  from the first install. Only state `DELIVERED` counts, and cancelled orders are removed.
+- **Till receipts:** go back much further (two years in practice). The first sync imports at most 400. Till product
+  numbers are converted to webshop products. A receipt on the day of a delivery is not counted twice.
+- **What you really paid:** AH lists multi-buy offers (1+1 gratis, 2e halve prijs, 3 voor 5,00) at the normal price
+  per item and settles them on the order total, only for complete groups and across products with the same offer.
+  The integration does the same per order (`order_items.effective`).
+
+## Suggestions
+
+### When a product is due
+
+Per product the integration computes how many you usually buy (`usual_qty`), every how many weeks (`every_weeks`),
+and how much you use per week (`per_week`). Only weeks with data count (a delivery or a receipt), so gaps don't make
+a product look rarer than it is. The rhythm comes from the period with known deliveries and the active period
+(first to last purchase).
+
+A product is **due** when the last purchase (quantity ÷ use per week) runs out before the delivery after the next
+one. Stocking up in a bonus therefore pushes "due" back by itself.
+
+- **Pause:** if nothing was bought for more than twice the usual interval (an outage, a holiday), "due" is judged
+  as if one usual interval has passed.
+- **Stopped:** not bought for 3 usual intervals (at least 6 weeks) means `stopped`, and the product is never
+  suggested.
+
+### Is the bonus a real deal
+
+The offer is converted to a price per item (1+1 gratis at €2,00 is €1,00). That price is compared with **what you
+really paid per item on average**:
+
+| Saving | Status |
+|---|---|
+| 5% or more cheaper | `echt` (real) |
+| Less | `let_op` (hardly any saving or more expensive for you) |
+| No purchase history yet | Compared with the normal price of the last 90 days (from 3 weekly prices); a normal price raised just before the bonus is `let_op` |
+
+### What `fill_list` puts on the list
+
+1. **Rhythm:** due, bought at least `min_count` times, and in at least `min_share` of the weeks. Quantity: the
+   usual quantity.
+2. **Bonus stock-up:** bought regularly and at least 20% real saving. Enough for about 2 weeks (fresh products:
+   1 week).
+
+Quantities are rounded up to the offer (1+1 gratis: even numbers). Products already on the list, in the order,
+suggested earlier for the same delivery, or snoozed are skipped. Each product gets reasons in plain Dutch
+("elke week · meestal 2", "1+1 gratis → 4 genomen …"). They are stored and shown on the "Voorstellen" sensor.
+
+### Snoozing and cleanup
+
+- `snooze_product`: don't suggest a product for a number of days, never again (`-1`), or again (`0`).
+- `cleanup_suggestions`: removes an automatically added product that was left untouched for 14 days. Untouched
+  means: same quantity, not ticked, not in the order, and not bought since. It is then snoozed for a week. If it
+  is still due after that, it is suggested again. Products you added or changed yourself are never removed.
+
+## Sensors
+
+Entity IDs can get your area as prefix, e.g. `sensor.keuken_albert_heijn_voorstellen`.
+
+| Sensor | State | Attributes |
+|---|---|---|
+| Next delivery date | Date | `date_display`, `shopping_type` |
+| Next delivery time | Time window | `start_time`, `end_time` |
+| Next order total | € | |
+| Next order status | Status text | `order_id`, `status`, `transaction_completed` |
+| Next order edit deadline | Timestamp | `reopenable`, `order_method`, `products_closing_time` |
+| Next order modifiable | Yes / No | |
+| Next order items | Number of products | `order_id`, `products` (id, title, quantity) |
+| Minimum order value | € | `current_total`, `remaining_to_minimum` |
+| Order submittable | Yes / No | |
+| Open orders | Number | `orders` (per order: date, time, total, state, closing time) |
+| Order spending | € of the next non-empty order | `total_upcoming`, `order_count` |
+| Vaak besteld | Products in the history | Sync summary, `due`, `top` (25), `last_error` |
+| Voorstellen | Suggestions for the current delivery | `week`, `items` (with `reasons`) |
+| Bonus volgende week | Good deals next week | `available`, `week_start`, `week_end`, `items` |
+
+Large attributes (`products`, `top`, `due`, `items`) are not recorded in the history database.
+
+## Services
+
+All services are in the `albert_heijn` domain. Services marked with *response* return data (use
+`response_variable` in a script, or `return_response` over the websocket).
+
+### Orders
+
+| Service | Fields | Does |
+|---|---|---|
+| `search_products` *response* | `query`, `limit` (10) | Search the AH assortment |
+| `add_to_order` | `product_id` + `quantity`, or `products: [{product_id, quantity}]`; `order_id` | Put products in the active order, or else the next order that can be changed. A submitted order is reopened first; confirm it again in the AH app |
+| `remove_from_order` | `product_id`, `order_id` | Remove a product |
+| `reopen_order` / `revert_order` | `order_id` | Reopen a submitted order / undo the reopen |
+| `lookup_barcode` *response* | `barcode` | EAN-8/13, UPC-A or GTIN-14 to AH product (empty if AH doesn't sell it) |
+
+### History and suggestions
+
+| Service | Fields | Does |
+|---|---|---|
+| `sync_history` *response* | `refresh_catalog` (false) | Sync now; returns the summary |
+| `get_frequent_items` *response* | `limit` (100, max 1000), `include_catalog` (true) | Products by how often and recently bought, with rhythm and `due`; then the rest of "Eerder gekocht" |
+| `fill_list` *response* | `dry_run`, `min_count` (3), `min_share` (0.3), `max_items` (25) | Put the suggestions on the AH shopping list; `dry_run` only returns them |
+| `cleanup_suggestions` *response* | `days` (14), `snooze_days` (7), `dry_run` | Remove suggestions that were left untouched (see above) |
+| `snooze_product` *response* | `product_id`, `days` (7; -1 never, 0 again) | Don't suggest a product for a while |
+| `get_bonus` *response* | `week` (`current` / `next`) | Bonus on what you buy, with the price per item, your average and the saving |
+
+### Analysis
+
+| Service | Fields | Does |
+|---|---|---|
+| `get_products` *response* | | Every product ever bought: last bought, times, average paid, current price and bonus, difference with your average |
+| `get_product_history` *response* | `product_id` | One product: every purchase with price, weekly prices, rhythm, totals, snooze |
+| `get_insights` *response* | `weeks` (12) | This and last month, per week (delivery / store), biggest items and categories (90 days), bonus savings, price movers |
+| `graphql_query` *response* | `query`, `variables` | Read-only GraphQL query on the AH API (no mutations); for exploring |
+
+## Example automations
+
+A complete setup (fill on Monday, check before the deadline with a notification button, tick off what is
+already in the order, clean up after the deadline, an on/off switch) is in the
+[Starnheim config](https://github.com/CBato/home-assistant-config/blob/main/packages/boodschappen.yaml).
+The core:
+
 ```yaml
 automation:
-  - alias: "AH Order Deadline Reminder"
-    trigger:
-      - platform: template
-        value_template: >
-          {{ (as_timestamp(states('sensor.albert_heijn_next_order_edit_deadline')) - as_timestamp(now())) < 7200 }}
-    condition:
-      - condition: state
-        entity_id: sensor.albert_heijn_next_order_modifiable
-        state: "Yes"
-    action:
-      - service: notify.mobile_app
+  - alias: "Boodschappen: lijst vullen"
+    triggers:
+      - trigger: time
+        at: "08:00:00"
+    conditions:
+      - condition: time
+        weekday: mon            # the bonus week starts on Monday
+    actions:
+      - action: albert_heijn.cleanup_suggestions
+        response_variable: opruim
+      - action: albert_heijn.fill_list
         data:
-          title: "Albert Heijn bestelling"
+          min_count: 3
+          min_share: 0.3
+          max_items: 25
+        response_variable: vulling
+      - action: notify.mobile_app_phone
+        data:
+          title: "Boodschappen"
           message: >
-            Je bestelling sluit over 2 uur! 
-            Totaal: €{{ states('sensor.albert_heijn_next_order_total') }}
-            ({{ state_attr('sensor.albert_heijn_minimum_order_value', 'remaining_to_minimum') | round(2) }}€ onder minimum)
+            {{ vulling.added | count }} producten op de lijst gezet:
+            {{ vulling.added | map(attribute='title') | join(', ') }}
 ```
 
-### Notify when minimum not reached
+A reminder before the edit deadline:
+
 ```yaml
-automation:
-  - alias: "AH Minimum Order Warning"
-    trigger:
-      - platform: state
-        entity_id: sensor.albert_heijn_order_submittable
-        to: "No"
-    action:
-      - service: notify.mobile_app
-        data:
-          title: "Albert Heijn"
-          message: >
-            Je bestelling is onder het minimum van €{{ states('sensor.albert_heijn_minimum_order_value') }}.
-            Nog €{{ state_attr('sensor.albert_heijn_minimum_order_value', 'remaining_to_minimum') | round(2) }} nodig.
+triggers:
+  - trigger: template
+    value_template: >
+      {% set d = as_timestamp(states('sensor.albert_heijn_next_order_edit_deadline'), 0) %}
+      {{ d > 0 and d - 3 * 3600 <= as_timestamp(now()) < d }}
+conditions:
+  - condition: state
+    entity_id: sensor.albert_heijn_next_order_modifiable
+    state: "Yes"
 ```
 
-## API Reference
+## Database
 
-This integration is built from the Albert Heijn mobile API, documented in `appie-go/doc/albertheijn_api.md`. The Go reference implementation in `appie-go/` shows the full API capabilities.
+`/config/albert_heijn.db` (SQLite, part of Home Assistant backups). You can browse it with the SQLite Web add-on.
+New columns are added automatically on start. A JSON history from fork 0.6/0.7 is imported once.
 
-## License
+| Table | Contents |
+|---|---|
+| `orders` | Order id, delivery date, status (`open` snapshot / `delivered`) |
+| `order_items` | Per order and product: quantity, price, price before bonus, bonus, unit price, `effective` (really paid) |
+| `products` | Title, brand, size, category, image, `in_catalog` (in "Eerder gekocht") |
+| `prices` | Weekly price check: price, price before bonus, bonus, unit price, `effective` (per item at the offer) |
+| `receipts`, `receipt_items`, `pos_map` | Till receipts, their lines, till product number to webshop product (-1 = not online) |
+| `bonus_weeks`, `bonus_offers` | Bonus weeks and their offers (previously bought + personal) |
+| `suggestions` | What `fill_list` added, per delivery, with reasons, `added_at` and `done_at` (handled by the cleanup) |
+| `snoozes` | Product, not suggested until (`9999-12-31` = never) |
+| `meta` | Sync timestamps |
 
-MIT
+## Development
+
+```
+custom_components/albert_heijn/
+  __init__.py      setup, nightly sync schedule, services and intents
+  api.py           AH API client (REST + GraphQL), data classes
+  auth.py          browser login proxy, token exchange and refresh
+  config_flow.py   login and reauth
+  coordinator.py   upcoming orders every 5 minutes; entry point for history, fill and cleanup
+  history.py       sync of history, receipts, catalog, prices and bonus; rhythm (compute_frequent); fill and cleanup
+  suggest.py       pure logic: offers, effective price, bonus check, suggestions (no I/O)
+  db.py            SQLite schema and queries (blocking, always run in the executor)
+  sensor.py        sensors
+  services.py      services (schemas in services.yaml)
+  intents.py       Assist intents (sentences in /custom_sentences)
+  www/             Lovelace card albert-heijn-orders-card, copied to /config/www/community/albert_heijn
+tests/             offline tests (no Home Assistant needed)
+scripts/           live scripts against the real AH API (login, fetch orders)
+```
+
+**Offline tests.** They stub the few Home Assistant names the code uses, and use a fake AH API and a temporary
+database:
+
+```
+python tests/run_all.py
+```
+
+**Live scripts.** Run them from the repository root. `python scripts/live_login.py` logs in through the browser and
+stores tokens in `.tokens.json` (git-ignored). `python scripts/live_api.py` then fetches your orders.
+
+**Releases.** Bump `version` in `manifest.json`. HACS shows the version from the default branch.
+
+### AH endpoints used
+
+| Purpose | Endpoint |
+|---|---|
+| Open / closed orders | GraphQL `orderFulfillments(status: OPEN / CLOSED)` (max 10) |
+| Order list | `GET /mobile-services/order/v1/summaries?sortBy=DEFAULT` (last 25) |
+| Order contents | `GET /mobile-services/order/v1/{id}/details-grouped-by-taxonomy` |
+| Change order | `PUT /mobile-services/order/v1/items` (header `Appie-Current-Order-Id`); GraphQL `orderReopen` / `orderRevert` |
+| Shopping list | `GET` / `PATCH /mobile-services/shoppinglist/v2/items` (upsert on productId, quantity 0 removes) |
+| Prices | `GET /mobile-services/product/search/v2/products?ids=…&sortOn=INPUT_PRODUCT_IDS` |
+| Search / barcode | `GET /mobile-services/product/search/v2?query=…` / `…/search/v1/gtin/{code}` |
+| Eerder gekocht | GraphQL `productSearch(previouslyBought: true)` |
+| Till receipts | GraphQL `posReceiptsPage`, `posReceiptDetails`, `productConvertId` |
+| Bonus | `/mobile-services/bonuspage/v3/metadata`, `…/v2/section/previously-bought`, `…/v1/personal` |
+
+GraphQL introspection is disabled at AH. `graphql_query` is meant for trying things out.
+
+## Limits and known issues
+
+- Delivery history only goes back 25 orders. The database grows from the first install.
+- Next week's bonus appears a few days before the week starts. Until then `Bonus volgende week` is 0 and
+  `available` is false.
+- Till receipt lines are amounts before discount. Store discounts are separate lines and are not attributed to
+  products yet.
+- After a submitted order is reopened by `add_to_order`, it has to be confirmed again in the AH app.
+- One AH account per Home Assistant: services use the first configured account.
+
+## Credits and license
+
+Original integration by [@dpvdberg](https://github.com/dpvdberg). History, suggestions and analysis by
+[@CBato](https://github.com/CBato). MIT license.

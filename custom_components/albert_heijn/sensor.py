@@ -266,12 +266,11 @@ class AHNextOrderItemCountSensor(AHBaseSensor):
     _attr_name = "Next order items"
     _attr_icon = "mdi:cart"
     _attr_native_unit_of_measurement = "items"
+    _unrecorded_attributes = frozenset({"products"})
 
     def __init__(self, coordinator: AlbertHeijnCoordinator) -> None:
         """Initialize."""
         super().__init__(coordinator, "next_order_item_count")
-
-    _unrecorded_attributes = frozenset({"products"})
 
     @property
     def native_value(self) -> int | None:

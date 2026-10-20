@@ -342,27 +342,6 @@ def save_pos_map(path: str, mapping: dict[int, int]) -> None:
         )
 
 
-def price_history(path: str, product_id: int) -> list[dict[str, Any]]:
-    """Weekly prices and the prices paid in delivered orders, oldest first."""
-    with closing(_connect(path)) as con:
-        weekly = [
-            {"d": r["date"], "p": r["price"], "b": r["price_before_bonus"], "bonus": r["bonus"], "u": r["unit_price"], "e": r["effective"]}
-            for r in con.execute(
-                "SELECT date, price, price_before_bonus, bonus, unit_price, effective FROM prices WHERE product_id = ? ORDER BY date",
-                (product_id,),
-            )
-        ]
-        paid = [
-            {"d": r["date"], "p": r["price"], "b": r["price_before_bonus"], "bonus": r["bonus"], "qty": r["quantity"], "order": True}
-            for r in con.execute(
-                """SELECT o.date, i.price, i.price_before_bonus, i.bonus, i.quantity FROM order_items i
-                   JOIN orders o ON o.order_id = i.order_id WHERE i.product_id = ? AND o.status = 'delivered' ORDER BY o.date""",
-                (product_id,),
-            )
-        ]
-    return sorted(weekly + paid, key=lambda x: x.get("d") or "")
-
-
 def price_series(path: str, product_ids: list[int], since: str) -> dict[int, list[dict[str, Any]]]:
     """Weekly prices since a date for several products (oldest first)."""
     out: dict[int, list[dict[str, Any]]] = {}

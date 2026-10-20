@@ -88,6 +88,12 @@ remove_from_order:
         number:
           min: 1
           mode: box
+    order_id:
+      name: Order ID
+      description: The order to change (default the active order, else the next one that can still be changed).
+      selector:
+        number:
+          mode: box
 
 revert_order:
   name: Revert Order
@@ -150,20 +156,6 @@ sync_history:
       default: false
       selector:
         boolean:
-
-get_price_history:
-  name: Get price history
-  description: Weekly prices (price, price without bonus, bonus) and the prices paid in delivered orders for one product.
-  fields:
-    product_id:
-      name: Product ID
-      description: The webshop product ID.
-      required: true
-      example: 54074
-      selector:
-        number:
-          min: 1
-          mode: box
 
 fill_list:
   name: Fill the shopping list
@@ -294,13 +286,6 @@ cleanup_suggestions:
     list with exactly the suggested quantity, not ticked, not in the order and not bought since. A removed product
     is not suggested again for snooze_days.
   fields:
-    snooze_days:
-      name: Snooze days
-      default: 7
-      selector:
-        number:
-          min: 0
-          max: 365
     days:
       name: Days
       default: 14
@@ -313,3 +298,10 @@ cleanup_suggestions:
       default: false
       selector:
         boolean:
+    snooze_days:
+      name: Snooze days
+      default: 7
+      selector:
+        number:
+          min: 0
+          max: 365
