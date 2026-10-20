@@ -7,14 +7,15 @@ One small file next to the HA config: /config/albert_heijn.db (included in HA ba
 from __future__ import annotations
 
 from contextlib import closing
+from datetime import date, timedelta
 import json
 import sqlite3
+from typing import Any
 
 try:
     from .suggest import order_effective_prices
 except ImportError:  # standalone use
     from suggest import order_effective_prices  # type: ignore[no-redef]
-from typing import Any
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -458,8 +459,6 @@ def insights(path: str, today: str, weeks: int = 12) -> dict[str, Any]:
 
     Spending: deliveries at what was really paid (order_items.effective), store visits at the receipt total.
     """
-    from datetime import date, timedelta
-
     t = date.fromisoformat(today)
     month_start = t.replace(day=1)
     prev_start = (month_start - timedelta(days=1)).replace(day=1)
@@ -705,11 +704,12 @@ def get_snoozes(path: str, today: str) -> dict[int, str]:
 
 
 def stale_suggestions(path: str, cutoff: str) -> list[dict[str, Any]]:
-    """Automatically added suggestions older than the cutoff that the cleanup has not handled yet (latest per product)."""
+    """Automatically added suggestions added on or before the cutoff date that the cleanup has not handled yet
+    (latest per product)."""
     with closing(_connect(path)) as con:
         rows = [dict(r) for r in con.execute(
             """SELECT week, product_id, title, quantity, added_at FROM suggestions
-               WHERE done_at IS NULL AND added_at < ? ORDER BY added_at""", (cutoff,))]
+               WHERE done_at IS NULL AND substr(added_at, 1, 10) <= ? ORDER BY added_at""", (cutoff,))]
     latest: dict[int, dict[str, Any]] = {}
     for r in rows:
         latest[r["product_id"]] = r

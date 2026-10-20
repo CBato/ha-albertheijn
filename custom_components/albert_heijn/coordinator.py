@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntry
@@ -18,6 +18,7 @@ from .api import (
     AlbertHeijnAuthError,
     AlbertHeijnData,
 )
+from .suggest import week_start
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_REFRESH_TOKEN,
@@ -79,10 +80,14 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
             )
             data.next_order = sorted_fulfillments[0]
 
-            # Get details for all orders (needed for card badges/deadlines)
+            # Details for all orders (card badges/deadlines); for the next order also its products, from the same request
             for f in sorted_fulfillments:
                 try:
-                    details = await self.api.get_order_details(f.order_id)
+                    if f is data.next_order:
+                        details, items = await self.api.get_order_with_items(f.order_id)
+                        data.next_order_items = items if details.total_items else []
+                    else:
+                        details = await self.api.get_order_details(f.order_id)
                     data.all_order_details[f.order_id] = details
                 except AlbertHeijnApiError as err:
                     _LOGGER.debug(
@@ -107,12 +112,6 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
                         "Could not fetch order value limits: %s", err
                     )
 
-            # Products in the next order (for "already in your order" in dashboards)
-            if data.order_details and data.order_details.total_items:
-                try:
-                    data.next_order_items = await self.api.get_order_items(next_order.order_id)
-                except AlbertHeijnApiError as err:
-                    _LOGGER.debug("Could not fetch next order items: %s", err)
 
         if self.history:
             self.history.next_delivery = data.next_order.delivery_slot.date if data.next_order else None
@@ -152,7 +151,7 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
         except AlbertHeijnAuthError:
             raise
         except AlbertHeijnApiError as err:
-            if "failed: 4" not in str(err):
+            if not err.status or not 400 <= err.status < 500:
                 raise
             # submitted order: reopen it and try once more
             await self.api.reopen_order(order_id)
@@ -168,11 +167,8 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
             raise AlbertHeijnApiError("Order history not available")
         data = self.data
         in_order = {i.product_id for i in data.next_order_items} if data else set()
-        week = data.next_order.delivery_slot.date if data and data.next_order else ""
-        if not week:
-            from datetime import date as _date, timedelta as _td
-            today = _date.today()
-            week = (today - _td(days=today.weekday())).isoformat()
+        # suggestions are per delivery; without an order: per bonus week
+        week = (data.next_order.delivery_slot.date if data and data.next_order else "") or week_start(date.today()).isoformat()
         result = await self.history.async_fill_list(data.fulfillments if data else [], in_order, week, **options)
         self._update_tokens()
         self.async_update_listeners()

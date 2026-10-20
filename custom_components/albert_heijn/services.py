@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import logging
-from typing import Any
 
 import voluptuous as vol
 
@@ -15,6 +14,7 @@ import homeassistant.helpers.config_validation as cv
 from .api import AlbertHeijnApiError
 from .const import DOMAIN
 from .coordinator import AlbertHeijnCoordinator
+from .history import OrderHistory
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,35 +29,12 @@ SERVICE_SYNC_HISTORY = "sync_history"
 SERVICE_GET_PRICE_HISTORY = "get_price_history"
 SERVICE_FILL_LIST = "fill_list"
 SERVICE_GRAPHQL_QUERY = "graphql_query"
-SERVICE_PROBE_ORDER_HISTORY = "probe_order_history"
 SERVICE_GET_PRODUCT_HISTORY = "get_product_history"
 SERVICE_GET_INSIGHTS = "get_insights"
 SERVICE_GET_PRODUCTS = "get_products"
 SERVICE_GET_BONUS = "get_bonus"
 SERVICE_SNOOZE_PRODUCT = "snooze_product"
 SERVICE_CLEANUP_SUGGESTIONS = "cleanup_suggestions"
-
-# Variants to find out how far back AH returns delivered orders (introspection is disabled at AH)
-_PROBE_GRAPHQL = {
-    "closed": "orderFulfillments(status: CLOSED)",
-    "closed_pagination": "orderFulfillments(status: CLOSED, pagination: {offset: 0, limit: 100})",
-    "closed_pagination_offset6": "orderFulfillments(status: CLOSED, pagination: {offset: 6, limit: 100})",
-    "closed_offset_limit": "orderFulfillments(status: CLOSED, offset: 0, limit: 100)",
-    "closed_page_size": "orderFulfillments(status: CLOSED, page: 0, size: 100)",
-    "closed_limit": "orderFulfillments(status: CLOSED, limit: 100)",
-    "closed_first": "orderFulfillments(status: CLOSED, first: 100)",
-    "no_status": "orderFulfillments",
-    "cancelled": "orderFulfillments(status: CANCELLED)",
-    "all": "orderFulfillments(status: ALL)",
-}
-_PROBE_REST = [
-    "/mobile-services/order/v1/summaries?sortBy=DEFAULT",
-    "/mobile-services/order/v1/summaries?sortBy=DEFAULT&page=1",
-    "/mobile-services/order/v1/summaries?sortBy=DEFAULT&page=1&size=25",
-    "/mobile-services/order/v1/summaries?sortBy=DEFAULT&size=100",
-    "/mobile-services/order/v1/summaries?sortBy=DEFAULT&offset=25",
-    "/mobile-services/order/v1/summaries?sortBy=DEFAULT&pageNumber=1",
-]
 
 ATTR_QUERY = "query"
 ATTR_PRODUCT_ID = "product_id"
@@ -143,6 +120,24 @@ SYNC_HISTORY_SCHEMA = vol.Schema(
     {vol.Optional(ATTR_REFRESH_CATALOG, default=False): cv.boolean}
 )
 
+CLEANUP_SUGGESTIONS_SCHEMA = vol.Schema(
+    {
+        vol.Optional("days", default=14): vol.All(vol.Coerce(int), vol.Range(min=1, max=90)),
+        vol.Optional("dry_run", default=False): cv.boolean,
+    }
+)
+
+SNOOZE_PRODUCT_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int),
+        vol.Optional("days", default=7): vol.All(vol.Coerce(int), vol.Range(min=-1, max=365)),
+    }
+)
+
+GET_BONUS_SCHEMA = vol.Schema({vol.Optional("week", default="current"): vol.In(["current", "next"])})
+
+GET_INSIGHTS_SCHEMA = vol.Schema({vol.Optional("weeks", default=12): vol.All(vol.Coerce(int), vol.Range(min=4, max=52))})
+
 
 def _get_coordinator(hass: HomeAssistant) -> AlbertHeijnCoordinator:
     """Get the first available coordinator."""
@@ -155,6 +150,14 @@ def _get_coordinator(hass: HomeAssistant) -> AlbertHeijnCoordinator:
     return next(iter(coordinators.values()))
 
 
+def _get_history(hass: HomeAssistant) -> OrderHistory:
+    """The stored order history of the first account."""
+    history = _get_coordinator(hass).history
+    if not history:
+        raise HomeAssistantError("Order history not available")
+    return history
+
+
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Set up services for the Albert Heijn integration."""
 
@@ -162,7 +165,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         """Handle search products service call."""
         coordinator = _get_coordinator(hass)
         query = call.data[ATTR_QUERY]
-        limit = call.data.get(ATTR_LIMIT, 5)
+        limit = call.data[ATTR_LIMIT]
 
         try:
             products = await coordinator.api.search_products(query, limit)
@@ -229,52 +232,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     async def handle_get_frequent_items(call: ServiceCall) -> ServiceResponse:
         """Products from the order history, most often ordered first; then the rest of "Eerder gekocht"."""
-        coordinator = _get_coordinator(hass)
-        if not coordinator.history:
-            raise HomeAssistantError("Order history not available")
-        history = coordinator.history
+        history = _get_history(hass)
         return {
             "orders": history.summary.get("orders"),
             "synced_at": history.summary.get("synced_at"),
             "products": history.frequent(call.data[ATTR_LIMIT], call.data[ATTR_INCLUDE_CATALOG]),
         }
-
-    async def handle_probe_order_history(call: ServiceCall) -> ServiceResponse:
-        """Try ways to get older delivered orders; per variant: count + date range, or the error message."""
-        coordinator = _get_coordinator(hass)
-        api = coordinator.api
-        out: dict[str, Any] = {}
-        for name, field in _PROBE_GRAPHQL.items():
-            query = f"query Probe {{ {field} {{ result {{ orderId statusCode statusDescription delivery {{ slot {{ date }} }} }} }} }}"
-            try:
-                data = await api._graphql(query)
-                rows = ((data or {}).get("orderFulfillments") or {}).get("result") or []
-                dates = sorted(((r.get("delivery") or {}).get("slot") or {}).get("date") or "" for r in rows)
-                statuses = sorted({str(r.get("statusDescription") or r.get("statusCode")) for r in rows})
-                out[name] = {"ok": True, "orders": len(rows), "from": dates[0] if dates else None,
-                             "to": dates[-1] if dates else None, "statuses": statuses}
-            except AlbertHeijnApiError as err:
-                out[name] = {"ok": False, "error": str(err)[:300]}
-        for path in _PROBE_REST:
-            try:
-                data = await api._request("GET", path)
-                if isinstance(data, list) and data and isinstance(data[0], dict) and "deliveryDate" in data[0]:
-                    dates = sorted(str(r.get("deliveryDate") or "")[:10] for r in data)
-                    info: Any = {"orders": len(data), "from": dates[0], "to": dates[-1],
-                                 "first_id": data[0].get("orderId"), "last_id": data[-1].get("orderId"),
-                                 "states": sorted({str(r.get("state")) for r in data}),
-                                 "with_products": sum(1 for r in data if r.get("orderedProducts"))}
-                elif isinstance(data, list):
-                    info = {"list": len(data), "first": str(data[0])[:300] if data else None}
-                elif isinstance(data, dict):
-                    info = {k: (len(v) if isinstance(v, list) else str(v)[:80]) for k, v in data.items()}
-                else:
-                    info = str(data)[:200]
-                out[path] = {"ok": True, "data": info}
-            except AlbertHeijnApiError as err:
-                out[path] = {"ok": False, "error": str(err)[:200]}
-        coordinator._update_tokens()
-        return out
 
     async def handle_graphql_query(call: ServiceCall) -> ServiceResponse:
         """Run a read-only GraphQL query against the AH API (to explore what it offers)."""
@@ -304,46 +267,29 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     async def handle_snooze_product(call: ServiceCall) -> ServiceResponse:
         """Don't suggest a product for a while (days), never again (-1) or again (0)."""
         coordinator = _get_coordinator(hass)
-        if not coordinator.history:
-            raise HomeAssistantError("Order history not available")
-        until = await coordinator.history.async_snooze(call.data[ATTR_PRODUCT_ID], call.data["days"])
+        until = await _get_history(hass).async_snooze(call.data[ATTR_PRODUCT_ID], call.data["days"])
         coordinator.async_update_listeners()
         return {"product_id": call.data[ATTR_PRODUCT_ID], "until": until}
 
     async def handle_get_bonus(call: ServiceCall) -> ServiceResponse:
         """Bonus of this or next week on products you buy, with the deal against what you paid on average."""
-        coordinator = _get_coordinator(hass)
-        if not coordinator.history:
-            raise HomeAssistantError("Order history not available")
-        return await coordinator.history.async_bonus(call.data.get("week", "current"))
+        return await _get_history(hass).async_bonus(call.data["week"])
 
     async def handle_get_products(call: ServiceCall) -> ServiceResponse:
         """Every product ever bought: last bought, times, average paid, current price and bonus, difference."""
-        coordinator = _get_coordinator(hass)
-        if not coordinator.history:
-            raise HomeAssistantError("Order history not available")
-        return {"products": await coordinator.history.async_products_overview()}
+        return {"products": await _get_history(hass).async_products_overview()}
 
     async def handle_get_insights(call: ServiceCall) -> ServiceResponse:
         """Spending this month, per week, biggest items, categories, bonus savings and price movers."""
-        coordinator = _get_coordinator(hass)
-        if not coordinator.history:
-            raise HomeAssistantError("Order history not available")
-        return await coordinator.history.async_insights(call.data.get("weeks", 12))
+        return await _get_history(hass).async_insights(call.data["weeks"])
 
     async def handle_get_product_history(call: ServiceCall) -> ServiceResponse:
         """One product: details, every purchase (delivery + store) with price, weekly prices, rhythm and totals."""
-        coordinator = _get_coordinator(hass)
-        if not coordinator.history:
-            raise HomeAssistantError("Order history not available")
-        return await coordinator.history.async_product_history(call.data[ATTR_PRODUCT_ID])
+        return await _get_history(hass).async_product_history(call.data[ATTR_PRODUCT_ID])
 
     async def handle_get_price_history(call: ServiceCall) -> ServiceResponse:
         """Weekly prices and paid prices of one product."""
-        coordinator = _get_coordinator(hass)
-        if not coordinator.history:
-            raise HomeAssistantError("Order history not available")
-        return {"prices": await coordinator.history.async_price_history(call.data[ATTR_PRODUCT_ID])}
+        return {"prices": await _get_history(hass).async_price_history(call.data[ATTR_PRODUCT_ID])}
 
     async def handle_sync_history(call: ServiceCall) -> ServiceResponse:
         """Fetch new delivered orders now (normally once a day)."""
@@ -412,13 +358,6 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
-        SERVICE_PROBE_ORDER_HISTORY,
-        handle_probe_order_history,
-        supports_response=SupportsResponse.ONLY,
-    )
-
-    hass.services.async_register(
-        DOMAIN,
         SERVICE_GRAPHQL_QUERY,
         handle_graphql_query,
         schema=GRAPHQL_QUERY_SCHEMA,
@@ -437,8 +376,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_CLEANUP_SUGGESTIONS,
         handle_cleanup_suggestions,
-        schema=vol.Schema({vol.Optional("days", default=14): vol.All(vol.Coerce(int), vol.Range(min=1, max=90)),
-                           vol.Optional("dry_run", default=False): cv.boolean}),
+        schema=CLEANUP_SUGGESTIONS_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
 
@@ -446,8 +384,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_SNOOZE_PRODUCT,
         handle_snooze_product,
-        schema=vol.Schema({vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int),
-                           vol.Optional("days", default=7): vol.All(vol.Coerce(int), vol.Range(min=-1, max=365))}),
+        schema=SNOOZE_PRODUCT_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
 
@@ -455,7 +392,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_GET_BONUS,
         handle_get_bonus,
-        schema=vol.Schema({vol.Optional("week", default="current"): vol.In(["current", "next"])}),
+        schema=GET_BONUS_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
 
@@ -470,7 +407,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_GET_INSIGHTS,
         handle_get_insights,
-        schema=vol.Schema({vol.Optional("weeks", default=12): vol.All(vol.Coerce(int), vol.Range(min=4, max=52))}),
+        schema=GET_INSIGHTS_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
 
@@ -513,7 +450,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_GET_PRICE_HISTORY,
         SERVICE_FILL_LIST,
         SERVICE_GRAPHQL_QUERY,
-        SERVICE_PROBE_ORDER_HISTORY,
         SERVICE_GET_PRODUCT_HISTORY,
         SERVICE_GET_INSIGHTS,
         SERVICE_GET_PRODUCTS,

@@ -220,12 +220,6 @@ graphql_query:
       selector:
         object:
 
-probe_order_history:
-  name: Probe order history
-  description: >-
-    Try several ways to get older delivered orders from AH (pagination, statuses, REST paths) and report per variant
-    how many orders and which period, or the error. Read-only.
-
 get_product_history:
   name: Get product history
   description: One product - details, every purchase (delivery and store receipt) with price per item, weekly prices, rhythm and totals.

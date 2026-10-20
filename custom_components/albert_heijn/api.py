@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -151,7 +150,11 @@ def _product_from_raw(p: dict[str, Any]) -> Product:
 
 
 class AlbertHeijnApiError(Exception):
-    """Base exception for API errors."""
+    """Base exception for API errors. `status` is the HTTP status when AH answered with an error."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class AlbertHeijnAuthError(AlbertHeijnApiError):
@@ -214,13 +217,14 @@ class AlbertHeijnApi:
         ) as resp:
             if resp.status == 401 and retry_auth:
                 await self.refresh_access_token()
-                return await self._request(method, path, json_data, retry_auth=False)
+                # same request again, including the extra headers (e.g. which order to change)
+                return await self._request(method, path, json_data, retry_auth=False, extra_headers=extra_headers)
             if resp.status == 401:
                 raise AlbertHeijnAuthError("Authentication failed after token refresh")
             if resp.status >= 400:
                 text = await resp.text()
                 raise AlbertHeijnApiError(
-                    f"API request failed: {resp.status} - {text}"
+                    f"API request failed: {resp.status} - {text}", resp.status
                 )
             if resp.content_type == "application/json":
                 return await resp.json()
@@ -249,7 +253,7 @@ class AlbertHeijnApi:
             if resp.status >= 400:
                 text = await resp.text()
                 raise AlbertHeijnApiError(
-                    f"GraphQL request failed: {resp.status} - {text}"
+                    f"GraphQL request failed: {resp.status} - {text}", resp.status
                 )
 
             data = await resp.json()
@@ -394,13 +398,27 @@ class AlbertHeijnApi:
 
         return fulfillments
 
-    async def get_order_details(self, order_id: int) -> OrderDetails:
-        """Get detailed order information including closing time."""
-        data = await self._request(
+    async def _order_raw(self, order_id: int) -> dict[str, Any]:
+        return await self._request(
             "GET",
             f"/mobile-services/order/v1/{order_id}/details-grouped-by-taxonomy",
-        )
+        ) or {}
 
+    async def get_order_details(self, order_id: int) -> OrderDetails:
+        """Get detailed order information including closing time."""
+        return self._parse_details(await self._order_raw(order_id), order_id)
+
+    async def get_order_items(self, order_id: int) -> list[OrderItem]:
+        """Get the list of items in an order."""
+        return self._parse_items(await self._order_raw(order_id))
+
+    async def get_order_with_items(self, order_id: int) -> tuple[OrderDetails, list[OrderItem]]:
+        """Details and items of an order from one request."""
+        data = await self._order_raw(order_id)
+        return self._parse_details(data, order_id), self._parse_items(data)
+
+    @staticmethod
+    def _parse_details(data: dict[str, Any], order_id: int) -> OrderDetails:
         total_items = 0
         for group in data.get("groupedProductsInTaxonomy", []):
             total_items += len(group.get("orderedProducts", []))
@@ -420,13 +438,8 @@ class AlbertHeijnApi:
             order_method=data.get("orderMethod"),
         )
 
-    async def get_order_items(self, order_id: int) -> list[OrderItem]:
-        """Get the list of items in an order."""
-        data = await self._request(
-            "GET",
-            f"/mobile-services/order/v1/{order_id}/details-grouped-by-taxonomy",
-        )
-
+    @staticmethod
+    def _parse_items(data: dict[str, Any]) -> list[OrderItem]:
         items: list[OrderItem] = []
         for group in data.get("groupedProductsInTaxonomy", []):
             category = group.get("taxonomyName") or group.get("name") or group.get("title") or ""
@@ -632,7 +645,7 @@ class AlbertHeijnApi:
         try:
             data = await self._request("GET", f"/mobile-services/product/search/v1/gtin/{digits}")
         except AlbertHeijnApiError as err:
-            if "failed: 404" in str(err):
+            if err.status == 404:
                 return None
             raise
         if not isinstance(data, dict):

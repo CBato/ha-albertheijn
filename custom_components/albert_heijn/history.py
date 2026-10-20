@@ -38,6 +38,7 @@ SUMMARY_PAGE = 25
 SUMMARY_MAX_PAGES = 40  # 1000 orders
 RECEIPTS_PAGE = 50
 RECEIPTS_FIRST = 400  # the first sync imports at most this many till receipts (newest first)
+CLEANUP_SNOOZE_DAYS = 28  # a suggestion the cleanup removed is not suggested again for 4 weeks
 
 
 def _now() -> str:
@@ -345,27 +346,35 @@ class OrderHistory:
         """Remove automatically added suggestions that were left on the list for `days` days.
 
         Only when the product is still on the list with exactly the suggested quantity (so nobody changed it), not
-        ticked, not in the order and not bought since. What you added yourself is never touched.
+        ticked, not in the order and not bought since. What you added yourself is never touched. A removed product is
+        snoozed for CLEANUP_SNOOZE_DAYS, otherwise the next fill_list (still "due") would put it straight back.
+        Compared by date, so the Monday run cleans what the Monday fill of two weeks ago added.
         """
-        now = _now()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        today = date.today()
+        cutoff = (today - timedelta(days=days)).isoformat()
         stale = await self._run(db.stale_suggestions, cutoff)
         if not stale:
-            return {"removed": [], "kept": 0}
+            return {"removed": [], "kept": 0, "dry_run": dry_run}
         on_list = {i["product_id"]: i for i in await self._api.get_shopping_list() if i.get("product_id")}
         bought = await self._run(db.last_purchase_dates, [s["product_id"] for s in stale])
         remove, done = [], []
         for s in stale:
             pid, item = s["product_id"], on_list.get(s["product_id"])
-            if not item or (bought.get(pid) or "") >= s["added_at"][:10]:
-                done.append(pid)  # gone from the list, or bought since: nothing to clean
-            elif not item["checked"] and pid not in in_order and item["quantity"] == (s["quantity"] or 1):
+            if not item or (bought.get(pid) or "") >= s["added_at"][:10] or item["quantity"] != (s["quantity"] or 1):
+                done.append(pid)  # gone from the list, bought since, or changed by hand: not ours to clean any more
+            elif not item["checked"] and pid not in in_order:
                 remove.append(s)
                 done.append(pid)
+            # ticked or in the order: it is being bought, look again next time
         if not dry_run:
             if remove:
                 await self._api.set_list_items([{"product_id": s["product_id"], "title": s["title"], "quantity": 0} for s in remove])
-            await self._run(db.mark_suggestions_done, done, now)
+                until = (today + timedelta(days=CLEANUP_SNOOZE_DAYS)).isoformat()
+                for s in remove:
+                    await self._run(db.set_snooze, s["product_id"], until)
+            await self._run(db.mark_suggestions_done, done, _now())
+            if remove:
+                await self._refresh_cache()
         return {"removed": [s["title"] for s in remove], "kept": len(stale) - len(done), "dry_run": dry_run}
 
     async def async_sync(
@@ -532,7 +541,7 @@ class OrderHistory:
                 await asyncio.sleep(REQUEST_PAUSE)
             await self._run(db.save_bonus_week, start, period.get("end"), offers, now)
             changed = True
-        self.bonus_periods = [p for p in await self._run(db.bonus_weeks)]
+        self.bonus_periods = await self._run(db.bonus_weeks)
         return changed
 
     async def async_bonus(self, week: str = "current") -> dict[str, Any]:
