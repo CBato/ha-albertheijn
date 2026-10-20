@@ -244,6 +244,22 @@ class OrderHistory:
         rows = self._frequent if include_catalog else [p for p in self._frequent if p["count"]]
         return [dict(p) for p in rows[:limit]]
 
+    async def async_product_history(self, product_id: int) -> dict[str, Any]:
+        """Details, all purchases, weekly prices and the rhythm of one product."""
+        data = await self._run(db.product_history, product_id)
+        rhythm = next((p for p in self._frequent if p.get("product_id") == product_id), None)
+        purchases = data["purchases"]
+        spent = [p["amount"] for p in purchases if p.get("amount") is not None]
+        data["rhythm"] = rhythm
+        data["totals"] = {
+            "purchases": len(purchases),
+            "quantity": round(sum(float(p.get("quantity") or 0) for p in purchases), 1),
+            "spent": round(sum(spent), 2) if spent else None,
+            "first": purchases[0]["date"] if purchases else None,
+            "last": purchases[-1]["date"] if purchases else None,
+        }
+        return data
+
     async def async_price_history(self, product_id: int) -> list[dict[str, Any]]:
         return await self._run(db.price_history, product_id)
 

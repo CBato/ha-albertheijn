@@ -4,7 +4,7 @@
 
 A Home Assistant custom integration for Albert Heijn grocery delivery, providing order tracking sensors and voice control through Assist.
 
-## This fork (CBato, 0.12.2)
+## This fork (CBato, 0.13.0)
 
 Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) with:
 
@@ -41,6 +41,8 @@ Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) wi
   and never suggested.
 - **`albert_heijn.graphql_query`** — read-only GraphQL query, to explore the AH API (introspection is disabled at AH).
 - **`albert_heijn.probe_order_history`** — tries pagination/status/REST variants to find older delivered orders.
+- **`albert_heijn.get_product_history`** — one product: every purchase (delivery and store, with price per item),
+  weekly prices, rhythm and totals (for a product card in a dashboard).
 - **`albert_heijn.sync_history`** — sync now; reports whether AH supports closed orders.
 - **`albert_heijn.lookup_barcode`** — barcode (EAN) → AH product.
 - **`albert_heijn.add_to_order`** — also works for a submitted (planned) order: it is reopened first and has to be

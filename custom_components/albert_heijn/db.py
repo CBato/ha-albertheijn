@@ -361,3 +361,42 @@ def get_suggestions(path: str, week: str) -> list[dict[str, Any]]:
 def delete_order(path: str, order_id: int) -> bool:
     with closing(_connect(path)) as con, con:
         return con.execute("DELETE FROM orders WHERE order_id = ?", (order_id,)).rowcount > 0
+
+
+def product_history(path: str, product_id: int) -> dict[str, Any]:
+    """Everything about one product: details, every purchase (delivery + till receipt) and the weekly prices."""
+    with closing(_connect(path)) as con:
+        prod = con.execute(
+            "SELECT product_id, title, brand, unit_size, category, image_url, in_catalog FROM products WHERE product_id = ?",
+            (product_id,),
+        ).fetchone()
+        purchases = [
+            {"date": r["date"], "source": "bezorging", "quantity": r["quantity"], "price": r["price"],
+             "price_before_bonus": r["price_before_bonus"], "bonus": r["bonus"],
+             "amount": round((r["price"] or 0) * (r["quantity"] or 0), 2) if r["price"] is not None else None}
+            for r in con.execute(
+                """SELECT o.date, i.quantity, i.price, i.price_before_bonus, i.bonus FROM order_items i
+                   JOIN orders o ON o.order_id = i.order_id WHERE i.product_id = ? AND o.status = 'delivered'""",
+                (product_id,),
+            )
+        ]
+        purchases += [
+            {"date": r["date"], "source": "winkel", "quantity": r["quantity"],
+             "price": round(r["amount"] / r["quantity"], 2) if r["amount"] is not None and r["quantity"] else None,
+             "price_before_bonus": None, "bonus": None, "amount": r["amount"], "name": r["name"]}
+            for r in con.execute(
+                """SELECT rc.date, ri.quantity, ri.amount, ri.name FROM receipt_items ri
+                   JOIN receipts rc ON rc.receipt_id = ri.receipt_id
+                   JOIN pos_map m ON m.pos_id = ri.pos_id WHERE m.product_id = ?""",
+                (product_id,),
+            )
+        ]
+        prices = [
+            {"d": r["date"], "p": r["price"], "b": r["price_before_bonus"], "bonus": r["bonus"], "e": r["effective"]}
+            for r in con.execute(
+                "SELECT date, price, price_before_bonus, bonus, effective FROM prices WHERE product_id = ? ORDER BY date",
+                (product_id,),
+            )
+        ]
+    purchases.sort(key=lambda x: x["date"])
+    return {"product": dict(prod) if prod else {"product_id": product_id}, "purchases": purchases, "prices": prices}

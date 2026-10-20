@@ -30,6 +30,7 @@ SERVICE_GET_PRICE_HISTORY = "get_price_history"
 SERVICE_FILL_LIST = "fill_list"
 SERVICE_GRAPHQL_QUERY = "graphql_query"
 SERVICE_PROBE_ORDER_HISTORY = "probe_order_history"
+SERVICE_GET_PRODUCT_HISTORY = "get_product_history"
 
 # Variants to find out how far back AH returns delivered orders (introspection is disabled at AH)
 _PROBE_GRAPHQL = {
@@ -287,6 +288,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Failed to fill the list: {err}") from err
 
+    async def handle_get_product_history(call: ServiceCall) -> ServiceResponse:
+        """One product: details, every purchase (delivery + store) with price, weekly prices, rhythm and totals."""
+        coordinator = _get_coordinator(hass)
+        if not coordinator.history:
+            raise HomeAssistantError("Order history not available")
+        return await coordinator.history.async_product_history(call.data[ATTR_PRODUCT_ID])
+
     async def handle_get_price_history(call: ServiceCall) -> ServiceResponse:
         """Weekly prices and paid prices of one product."""
         coordinator = _get_coordinator(hass)
@@ -384,6 +392,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_GET_PRODUCT_HISTORY,
+        handle_get_product_history,
+        schema=PRICE_HISTORY_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_GET_PRICE_HISTORY,
         handle_get_price_history,
         schema=PRICE_HISTORY_SCHEMA,
@@ -414,5 +430,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_FILL_LIST,
         SERVICE_GRAPHQL_QUERY,
         SERVICE_PROBE_ORDER_HISTORY,
+        SERVICE_GET_PRODUCT_HISTORY,
     ):
         hass.services.async_remove(DOMAIN, service)
