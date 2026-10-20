@@ -202,3 +202,20 @@ fill_list:
         number:
           min: 1
           max: 100
+
+graphql_query:
+  name: GraphQL query (explore)
+  description: Run a read-only GraphQL query against the AH API, to explore what it offers. Mutations are refused.
+  fields:
+    query:
+      name: Query
+      required: true
+      example: "query { __type(name: \"OrderFulfillmentStatus\") { enumValues { name } } }"
+      selector:
+        text:
+          multiline: true
+    variables:
+      name: Variables
+      required: false
+      selector:
+        object:

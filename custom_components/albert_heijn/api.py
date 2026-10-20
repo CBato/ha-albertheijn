@@ -446,6 +446,55 @@ class AlbertHeijnApi:
 
         return [_product_from_raw(p) for p in data.get("products", []) if p.get("webshopId")]
 
+    async def get_receipts(self, offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
+        """Till receipts (in-store purchases with the bonus card), newest first: id, datetime, total."""
+        query = """query FetchPosReceipts($offset: Int!, $limit: Int!) {
+  posReceiptsPage(pagination: {offset: $offset, limit: $limit}) {
+    posReceipts { id dateTime totalAmount { amount } }
+  }
+}"""
+        data = await self._graphql(query, {"offset": int(offset), "limit": int(limit)})
+        rows = ((data or {}).get("posReceiptsPage") or {}).get("posReceipts") or []
+        return [
+            {"id": r["id"], "datetime": r["dateTime"], "total": (r.get("totalAmount") or {}).get("amount")}
+            for r in rows
+            if r.get("id") and r.get("dateTime")
+        ]
+
+    async def get_receipt_lines(self, receipt_id: str) -> list[dict[str, Any]]:
+        """Lines of one till receipt: pos_id (till product id), name, quantity, amount."""
+        query = """query FetchReceipt($id: String!) {
+  posReceiptDetails(id: $id) {
+    id
+    products { id quantity name amount { amount } }
+  }
+}"""
+        data = await self._graphql(query, {"id": receipt_id})
+        det = (data or {}).get("posReceiptDetails") or {}
+        return [
+            {"pos_id": p.get("id"), "name": p.get("name") or "", "quantity": p.get("quantity") or 1,
+             "amount": (p.get("amount") or {}).get("amount")}
+            for p in det.get("products") or []
+            if p.get("id")
+        ]
+
+    async def convert_pos_ids(self, pos_ids: list[int]) -> dict[int, int]:
+        """Till product ids → webshop product ids (-1 when AH has no online product)."""
+        out: dict[int, int] = {}
+        ids = [int(i) for i in pos_ids]
+        for start in range(0, len(ids), 50):
+            chunk = ids[start : start + 50]
+            aliases = " ".join(f"p{i}: productConvertId(sourceId: {pid})" for i, pid in enumerate(chunk))
+            data = await self._graphql(f"query Convert {{ {aliases} }}") or {}
+            out.update({pid: data.get(f"p{i}") or -1 for i, pid in enumerate(chunk)})
+        return out
+
+    async def graphql_query(self, query: str, variables: dict[str, Any] | None = None) -> Any:
+        """Read-only GraphQL query, for exploring what the AH API offers."""
+        if "mutation" in query.lower():
+            raise AlbertHeijnApiError("Only queries are allowed, no mutations")
+        return await self._graphql(query, variables)
+
     async def get_shopping_list(self) -> list[dict[str, Any]]:
         """The AH shopping list (in the AH app also the basket): product_id (None for free text), title, quantity, checked."""
         data = await self._request("GET", "/mobile-services/shoppinglist/v2/items")

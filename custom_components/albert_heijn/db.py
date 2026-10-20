@@ -63,6 +63,25 @@ CREATE TABLE IF NOT EXISTS suggestions (
     added_at TEXT,
     PRIMARY KEY (week, product_id)
 );
+CREATE TABLE IF NOT EXISTS receipts (
+    receipt_id TEXT PRIMARY KEY,   -- in-store purchase with the bonus card
+    date TEXT NOT NULL,
+    total REAL,
+    updated TEXT
+);
+CREATE TABLE IF NOT EXISTS receipt_items (
+    receipt_id TEXT NOT NULL REFERENCES receipts(receipt_id) ON DELETE CASCADE,
+    line INTEGER NOT NULL,
+    pos_id INTEGER,                 -- till product id
+    name TEXT,                      -- till name, e.g. 'AH APPELSAP'
+    quantity REAL,
+    amount REAL,
+    PRIMARY KEY (receipt_id, line)
+);
+CREATE TABLE IF NOT EXISTS pos_map (
+    pos_id INTEGER PRIMARY KEY,     -- till product id
+    product_id INTEGER              -- webshop product id, -1 = not sold online
+);
 CREATE INDEX IF NOT EXISTS idx_order_items_product ON order_items(product_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status_date ON orders(status, date);
 """
@@ -193,18 +212,29 @@ def save_prices(path: str, day: str, rows: list[dict[str, Any]]) -> int:
 
 
 def load_for_frequent(path: str) -> dict[str, Any]:
-    """Everything needed to compute frequent products and rhythm, in one read."""
+    """Everything needed to compute frequent products and rhythm, in one read.
+
+    Purchases = delivered orders + till receipts (receipt lines with a webshop product), each with a date and source.
+    """
     with closing(_connect(path)) as con:
-        order_days = [r["date"] for r in con.execute("SELECT date FROM orders WHERE status = 'delivered' ORDER BY date")]
         items = [
             dict(r)
             for r in con.execute(
-                """SELECT o.date, i.product_id, i.quantity, p.title, p.brand, p.unit_size, p.category, p.image_url
+                """SELECT o.date, 'bezorging' AS source, i.product_id, i.quantity, p.title, p.brand, p.unit_size, p.category, p.image_url
                    FROM orders o JOIN order_items i ON i.order_id = o.order_id
                    LEFT JOIN products p ON p.product_id = i.product_id
-                   WHERE o.status = 'delivered' ORDER BY o.date"""
+                   WHERE o.status = 'delivered'
+                   UNION ALL
+                   SELECT r.date, 'winkel' AS source, m.product_id, ri.quantity, COALESCE(p.title, ri.name), p.brand, p.unit_size,
+                          p.category, p.image_url
+                   FROM receipts r JOIN receipt_items ri ON ri.receipt_id = r.receipt_id
+                   JOIN pos_map m ON m.pos_id = ri.pos_id AND m.product_id > 0
+                   LEFT JOIN products p ON p.product_id = m.product_id
+                   ORDER BY 1"""
             )
         ]
+        order_days = [r["date"] for r in con.execute("SELECT date FROM orders WHERE status = 'delivered' ORDER BY date")]
+        receipt_days = [r["date"] for r in con.execute("SELECT date FROM receipts ORDER BY date")]
         catalog = [
             dict(r)
             for r in con.execute(
@@ -220,8 +250,46 @@ def load_for_frequent(path: str) -> dict[str, Any]:
             """SELECT (SELECT COUNT(*) FROM products) AS products,
                       (SELECT COUNT(*) FROM prices) AS price_points"""
         ).fetchone()
-    return {"order_days": order_days, "items": items, "catalog": catalog, "latest_prices": latest,
-            "products": counts["products"], "price_points": counts["price_points"]}
+    return {"order_days": order_days, "receipt_days": receipt_days, "items": items, "catalog": catalog,
+            "latest_prices": latest, "products": counts["products"], "price_points": counts["price_points"]}
+
+
+def known_receipts(path: str) -> set[str]:
+    with closing(_connect(path)) as con:
+        return {r["receipt_id"] for r in con.execute("SELECT receipt_id FROM receipts")}
+
+
+def save_receipt(path: str, receipt_id: str, day: str, total: float | None, lines: list[dict[str, Any]], now: str) -> None:
+    with closing(_connect(path)) as con, con:
+        con.execute(
+            """INSERT INTO receipts(receipt_id, date, total, updated) VALUES(?, ?, ?, ?)
+               ON CONFLICT(receipt_id) DO UPDATE SET date = excluded.date, total = excluded.total, updated = excluded.updated""",
+            (receipt_id, day, total, now),
+        )
+        con.execute("DELETE FROM receipt_items WHERE receipt_id = ?", (receipt_id,))
+        con.executemany(
+            "INSERT INTO receipt_items(receipt_id, line, pos_id, name, quantity, amount) VALUES(?, ?, ?, ?, ?, ?)",
+            [(receipt_id, n, ln.get("pos_id"), ln.get("name"), ln.get("quantity"), ln.get("amount")) for n, ln in enumerate(lines)],
+        )
+
+
+def unmapped_pos_ids(path: str) -> list[int]:
+    with closing(_connect(path)) as con:
+        return [
+            r["pos_id"]
+            for r in con.execute(
+                """SELECT DISTINCT ri.pos_id FROM receipt_items ri LEFT JOIN pos_map m ON m.pos_id = ri.pos_id
+                   WHERE ri.pos_id IS NOT NULL AND m.pos_id IS NULL"""
+            )
+        ]
+
+
+def save_pos_map(path: str, mapping: dict[int, int]) -> None:
+    with closing(_connect(path)) as con, con:
+        con.executemany(
+            "INSERT INTO pos_map(pos_id, product_id) VALUES(?, ?) ON CONFLICT(pos_id) DO UPDATE SET product_id = excluded.product_id",
+            list(mapping.items()),
+        )
 
 
 def price_history(path: str, product_id: int) -> list[dict[str, Any]]:

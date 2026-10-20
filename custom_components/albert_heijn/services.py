@@ -27,6 +27,7 @@ SERVICE_GET_FREQUENT_ITEMS = "get_frequent_items"
 SERVICE_SYNC_HISTORY = "sync_history"
 SERVICE_GET_PRICE_HISTORY = "get_price_history"
 SERVICE_FILL_LIST = "fill_list"
+SERVICE_GRAPHQL_QUERY = "graphql_query"
 
 ATTR_QUERY = "query"
 ATTR_PRODUCT_ID = "product_id"
@@ -91,6 +92,10 @@ GET_FREQUENT_ITEMS_SCHEMA = vol.Schema(
         ),
         vol.Optional(ATTR_INCLUDE_CATALOG, default=True): cv.boolean,
     }
+)
+
+GRAPHQL_QUERY_SCHEMA = vol.Schema(
+    {vol.Required("query"): cv.string, vol.Optional("variables", default={}): dict}
 )
 
 FILL_LIST_SCHEMA = vol.Schema(
@@ -204,6 +209,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             "products": history.frequent(call.data[ATTR_LIMIT], call.data[ATTR_INCLUDE_CATALOG]),
         }
 
+    async def handle_graphql_query(call: ServiceCall) -> ServiceResponse:
+        """Run a read-only GraphQL query against the AH API (to explore what it offers)."""
+        coordinator = _get_coordinator(hass)
+        try:
+            data = await coordinator.api.graphql_query(call.data["query"], call.data.get("variables") or None)
+        except AlbertHeijnApiError as err:
+            raise HomeAssistantError(f"GraphQL query failed: {err}") from err
+        return {"data": data}
+
     async def handle_fill_list(call: ServiceCall) -> ServiceResponse:
         """Put this week's suggestions (order rhythm + bonus) on the AH shopping list."""
         coordinator = _get_coordinator(hass)
@@ -286,6 +300,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_GRAPHQL_QUERY,
+        handle_graphql_query,
+        schema=GRAPHQL_QUERY_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_FILL_LIST,
         handle_fill_list,
         schema=FILL_LIST_SCHEMA,
@@ -322,5 +344,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_SYNC_HISTORY,
         SERVICE_GET_PRICE_HISTORY,
         SERVICE_FILL_LIST,
+        SERVICE_GRAPHQL_QUERY,
     ):
         hass.services.async_remove(DOMAIN, service)

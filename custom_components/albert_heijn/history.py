@@ -15,6 +15,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from . import db
 from .api import AlbertHeijnApi, AlbertHeijnApiError, Fulfillment
@@ -33,6 +34,8 @@ PRICE_EVERY_DAYS = 7  # weekly price check
 PRICE_MAX_PRODUCTS = 2000
 PRICE_BATCH = 30
 CATALOG_EVERY_DAYS = 7
+RECEIPTS_PAGE = 50
+RECEIPTS_FIRST = 400  # the first sync imports at most this many till receipts (newest first)
 
 
 def _now() -> str:
@@ -49,20 +52,26 @@ def _older_than(stamp: str | None, days: int) -> bool:
 
 
 def compute_frequent(snapshot: dict[str, Any], today: date | None = None, horizon_days: int = 7) -> list[dict[str, Any]]:
-    """Products sorted by how often (and how recently) they were delivered, with their order rhythm,
-    followed by the rest of "Eerder gekocht".
+    """Products sorted by how often (and how recently) they were bought, with their rhythm, followed by the rest
+    of "Eerder gekocht". Purchases = delivered orders + till receipts (in-store with the bonus card).
 
-    Per product: count (orders), quantity (total), usual_qty (median per order), every_weeks (median gap),
-    share (part of the orders since it was first ordered), per_week (average quantity per week),
-    days_since, due, and the latest weekly price.
+    Per product: count (days bought), quantity (total), usual_qty (median per purchase), every_weeks (median gap),
+    share (part of the weeks since the first purchase in which it was bought), per_week (average use per week),
+    days_since, due, sources, and the latest weekly price.
 
     due = the stock from the last purchase (last quantity / use per week) runs out within horizon_days
     (normally: until the delivery after the next one). So 4 pakken in de bonus last twice as long as 2.
+    A pause (nothing bought for more than twice the usual interval, e.g. an AH outage or a holiday) is not counted:
+    then "due" is judged as if one usual interval has passed since the last purchase.
     """
     today = today or date.today()
-    order_days = [date.fromisoformat(d) for d in snapshot["order_days"]]
-    latest = order_days[-1] if order_days else today
+    days_all = sorted({date.fromisoformat(d) for d in snapshot["order_days"] + snapshot.get("receipt_days", [])})
+    latest = days_all[-1] if days_all else today
     prices = snapshot["latest_prices"]
+    hh_gaps = [(b - a).days for a, b in zip(days_all, days_all[1:])]
+    hh_gap = median(hh_gaps) if hh_gaps else 7
+    paused = (today - latest).days > max(14, 2 * hh_gap)
+    judge_day = latest + timedelta(days=round(hh_gap)) if paused else today
 
     stats: dict[int, dict[str, Any]] = {}
     for row in snapshot["items"]:
@@ -73,26 +82,34 @@ def compute_frequent(snapshot: dict[str, Any], today: date | None = None, horizo
             s = stats[pid] = {
                 "product_id": pid, "title": row.get("title") or "", "brand": row.get("brand") or "",
                 "unit_size": row.get("unit_size") or "", "category": row.get("category") or "",
-                "image_url": row.get("image_url"), "count": 0, "quantity": 0, "score": 0.0, "_days": [], "_qty": [],
+                "image_url": row.get("image_url"), "_buy": {}, "_src": set(),
             }
-        qty = int(row.get("quantity") or 1)
-        if s["_days"] and s["_days"][-1] == day:
-            s["_qty"][-1] += qty
-        else:
-            s["_days"].append(day)
-            s["_qty"].append(qty)
-            s["count"] += 1
-            s["score"] += 0.5 ** (max((today - day).days, 0) / HALF_LIFE_DAYS)
-        s["quantity"] += qty
+        try:
+            qty = max(1, round(float(row.get("quantity") or 1)))
+        except (TypeError, ValueError):
+            qty = 1
+        # same day from two sources (delivery + receipt of that delivery) counts once: take the largest
+        s["_buy"][day] = max(s["_buy"].get(day, 0), qty)
+        s["_src"].add(row.get("source") or "bezorging")
+        if not s["title"] and row.get("title"):
+            s["title"] = row["title"]
+
+    for s in stats.values():
+        s["count"] = len(s["_buy"])
+        s["quantity"] = sum(s["_buy"].values())
+        s["score"] = sum(0.5 ** (max((today - d).days, 0) / HALF_LIFE_DAYS) for d in s["_buy"])
 
     result = sorted(stats.values(), key=lambda s: (-s["score"], -s["count"], s["title"]))
     for s in result:
-        days, qtys = s.pop("_days"), s.pop("_qty")
+        buy = s.pop("_buy")
+        days = sorted(buy)
+        qtys = [buy[d] for d in days]
         first, last = days[0], days[-1]
-        since_first = sum(1 for d in order_days if d >= first)
         gaps = [(b - a).days for a, b in zip(days, days[1:])]
         gap = median(gaps) if gaps else None
         weeks = max(1.0, ((latest - first).days / 7) + 1)
+        week_slots = (latest - first).days // 7 + 1
+        weeks_bought = len({(d - first).days // 7 for d in days})
         per_week = s["quantity"] / weeks
         covers = qtys[-1] / per_week * 7 if per_week else None  # days the last purchase lasts
         s.update({
@@ -101,10 +118,11 @@ def compute_frequent(snapshot: dict[str, Any], today: date | None = None, horizo
             "usual_qty": int(median(qtys)),
             "every_weeks": max(1, round(gap / 7)) if gap else None,
             "interval_days": round(gap) if gap else None,
-            "share": round(s["count"] / since_first, 2) if since_first else None,
+            "share": round(weeks_bought / week_slots, 2) if week_slots else None,
             "per_week": round(per_week, 1),
             "covers_days": round(covers) if covers else None,
-            "due": len(days) >= 2 and covers is not None and covers < (today - last).days + horizon_days,
+            "due": len(days) >= 2 and covers is not None and covers < (judge_day - last).days + horizon_days,
+            "sources": sorted(s.pop("_src")),
             "score": round(s["score"], 2),
         })
         if p := prices.get(s["product_id"]):
@@ -173,10 +191,14 @@ class OrderHistory:
         snap = await self._run(db.load_for_frequent)
         self._frequent = await self._hass.async_add_executor_job(compute_frequent, snap, None, self.horizon_days())
         days = snap["order_days"]
+        rdays = snap.get("receipt_days") or []
         self.summary = {
             "orders": len(days),
             "first_order": days[0] if days else None,
             "last_order": days[-1] if days else None,
+            "receipts": len(rdays),
+            "first_receipt": rdays[0] if rdays else None,
+            "last_receipt": rdays[-1] if rdays else None,
             "products_ordered": sum(1 for p in self._frequent if p["count"]),
             "catalog": len(snap["catalog"]),
             "products": snap["products"],
@@ -291,10 +313,18 @@ class OrderHistory:
                     _LOGGER.debug("Previously bought not available: %s", err)
                     errors.append(f"Eerder gekocht: {err}")
 
+            # 4. Till receipts (in-store purchases with the bonus card): new ones, the first time up to RECEIPTS_FIRST
+            try:
+                if await self._fetch_receipts(now):
+                    changed = True
+            except AlbertHeijnApiError as err:
+                _LOGGER.debug("Receipts not available: %s", err)
+                errors.append(f"Kassabonnen: {err}")
+
             # rebuild the cache first: the price check uses the product list
             await self._refresh_cache()
 
-            # 4. Weekly price check for everything we buy (history first, then the catalog)
+            # 5. Weekly price check for everything we buy (history first, then the catalog)
             if refresh_catalog or refresh_prices or _older_than(self.meta.get("prices_at"), PRICE_EVERY_DAYS):
                 got, err = await self._fetch_prices(today)
                 if err:
@@ -318,6 +348,34 @@ class OrderHistory:
         if not items:
             return False
         return await self._run(db.save_order, int(order_id), day, status, [asdict(i) for i in items], now)
+
+    async def _fetch_receipts(self, now: str) -> bool:
+        """Import new till receipts and map their till product ids to webshop products."""
+        known = await self._run(db.known_receipts)
+        limit = RECEIPTS_PAGE
+        max_new = RECEIPTS_FIRST if not known else RECEIPTS_PAGE * 4
+        new: list[dict[str, Any]] = []
+        offset = 0
+        while len(new) < max_new:
+            page = await self._api.get_receipts(offset, limit)
+            fresh = [r for r in page if r["id"] not in known]
+            new.extend(fresh)
+            if len(page) < limit or len(fresh) < len(page):
+                break  # last page, or we reached receipts we already have
+            offset += limit
+            await asyncio.sleep(REQUEST_PAUSE)
+        tz = dt_util.get_default_time_zone()
+        for r in new[:max_new]:
+            lines = await self._api.get_receipt_lines(r["id"])
+            moment = datetime.fromisoformat(r["datetime"].replace("Z", "+00:00"))
+            day = (moment.astimezone(tz) if moment.tzinfo else moment).date().isoformat()
+            await self._run(db.save_receipt, r["id"], day, r.get("total"), lines, now)
+            await asyncio.sleep(REQUEST_PAUSE)
+        unmapped = await self._run(db.unmapped_pos_ids)
+        if unmapped:
+            mapping = await self._api.convert_pos_ids(unmapped)
+            await self._run(db.save_pos_map, mapping)
+        return bool(new) or bool(unmapped)
 
     async def _fetch_prices(self, today: str) -> tuple[int, str | None]:
         ids = [int(p["product_id"]) for p in self._frequent[:PRICE_MAX_PRODUCTS] if p.get("product_id")]
