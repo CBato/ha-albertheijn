@@ -341,6 +341,33 @@ class OrderHistory:
             "skipped": {"on_list": len(on_list), "in_order": len(in_order), "earlier_this_week": len(before)},
         }
 
+    async def async_cleanup_suggestions(self, in_order: set[int], days: int = 14, dry_run: bool = False) -> dict[str, Any]:
+        """Remove automatically added suggestions that were left on the list for `days` days.
+
+        Only when the product is still on the list with exactly the suggested quantity (so nobody changed it), not
+        ticked, not in the order and not bought since. What you added yourself is never touched.
+        """
+        now = _now()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        stale = await self._run(db.stale_suggestions, cutoff)
+        if not stale:
+            return {"removed": [], "kept": 0}
+        on_list = {i["product_id"]: i for i in await self._api.get_shopping_list() if i.get("product_id")}
+        bought = await self._run(db.last_purchase_dates, [s["product_id"] for s in stale])
+        remove, done = [], []
+        for s in stale:
+            pid, item = s["product_id"], on_list.get(s["product_id"])
+            if not item or (bought.get(pid) or "") >= s["added_at"][:10]:
+                done.append(pid)  # gone from the list, or bought since: nothing to clean
+            elif not item["checked"] and pid not in in_order and item["quantity"] == (s["quantity"] or 1):
+                remove.append(s)
+                done.append(pid)
+        if not dry_run:
+            if remove:
+                await self._api.set_list_items([{"product_id": s["product_id"], "title": s["title"], "quantity": 0} for s in remove])
+            await self._run(db.mark_suggestions_done, done, now)
+        return {"removed": [s["title"] for s in remove], "kept": len(stale) - len(done), "dry_run": dry_run}
+
     async def async_sync(
         self, open_orders: list[Fulfillment], refresh_catalog: bool = False, refresh_prices: bool = False
     ) -> bool:

@@ -35,6 +35,7 @@ SERVICE_GET_INSIGHTS = "get_insights"
 SERVICE_GET_PRODUCTS = "get_products"
 SERVICE_GET_BONUS = "get_bonus"
 SERVICE_SNOOZE_PRODUCT = "snooze_product"
+SERVICE_CLEANUP_SUGGESTIONS = "cleanup_suggestions"
 
 # Variants to find out how far back AH returns delivered orders (introspection is disabled at AH)
 _PROBE_GRAPHQL = {
@@ -292,6 +293,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Failed to fill the list: {err}") from err
 
+    async def handle_cleanup_suggestions(call: ServiceCall) -> ServiceResponse:
+        """Remove automatically added suggestions that were left on the list for `days` days."""
+        coordinator = _get_coordinator(hass)
+        try:
+            return await coordinator.async_cleanup_suggestions(call.data["days"], call.data["dry_run"])
+        except AlbertHeijnApiError as err:
+            raise HomeAssistantError(f"Cleanup failed: {err}") from err
+
     async def handle_snooze_product(call: ServiceCall) -> ServiceResponse:
         """Don't suggest a product for a while (days), never again (-1) or again (0)."""
         coordinator = _get_coordinator(hass)
@@ -426,6 +435,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_CLEANUP_SUGGESTIONS,
+        handle_cleanup_suggestions,
+        schema=vol.Schema({vol.Optional("days", default=14): vol.All(vol.Coerce(int), vol.Range(min=1, max=90)),
+                           vol.Optional("dry_run", default=False): cv.boolean}),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_SNOOZE_PRODUCT,
         handle_snooze_product,
         schema=vol.Schema({vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int),
@@ -501,5 +519,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_GET_PRODUCTS,
         SERVICE_GET_BONUS,
         SERVICE_SNOOZE_PRODUCT,
+        SERVICE_CLEANUP_SUGGESTIONS,
     ):
         hass.services.async_remove(DOMAIN, service)

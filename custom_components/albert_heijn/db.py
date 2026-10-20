@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS suggestions (
     reasons TEXT,                   -- JSON list of reasons in plain Dutch
     bonus_check TEXT,               -- 'echt', 'let_op', 'onbekend' or NULL
     added_at TEXT,
+    done_at TEXT,                   -- set when the cleanup removed it (or found it gone / bought)
     PRIMARY KEY (week, product_id)
 );
 CREATE TABLE IF NOT EXISTS receipts (
@@ -141,6 +142,9 @@ def init(path: str) -> None:
         cols = {r["name"] for r in con.execute("PRAGMA table_info(prices)")}
         if "effective" not in cols:
             con.execute("ALTER TABLE prices ADD COLUMN effective REAL")
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(suggestions)")}
+        if "done_at" not in cols:
+            con.execute("ALTER TABLE suggestions ADD COLUMN done_at TEXT")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(order_items)")}
         if "effective" not in cols:
             con.execute("ALTER TABLE order_items ADD COLUMN effective REAL")
@@ -698,3 +702,42 @@ def set_snooze(path: str, product_id: int, until: str | None) -> None:
 def get_snoozes(path: str, today: str) -> dict[int, str]:
     with closing(_connect(path)) as con:
         return {r["product_id"]: r["until"] for r in con.execute("SELECT product_id, until FROM snoozes WHERE until > ?", (today,))}
+
+
+def stale_suggestions(path: str, cutoff: str) -> list[dict[str, Any]]:
+    """Automatically added suggestions older than the cutoff that the cleanup has not handled yet (latest per product)."""
+    with closing(_connect(path)) as con:
+        rows = [dict(r) for r in con.execute(
+            """SELECT week, product_id, title, quantity, added_at FROM suggestions
+               WHERE done_at IS NULL AND added_at < ? ORDER BY added_at""", (cutoff,))]
+    latest: dict[int, dict[str, Any]] = {}
+    for r in rows:
+        latest[r["product_id"]] = r
+    return list(latest.values())
+
+
+def mark_suggestions_done(path: str, product_ids: list[int], now: str) -> None:
+    with closing(_connect(path)) as con, con:
+        con.executemany("UPDATE suggestions SET done_at = ? WHERE product_id = ? AND done_at IS NULL",
+                        [(now, pid) for pid in product_ids])
+
+
+def last_purchase_dates(path: str, product_ids: list[int]) -> dict[int, str]:
+    """Latest purchase date per product (delivery or store)."""
+    out: dict[int, str] = {}
+    if not product_ids:
+        return out
+    marks = ",".join("?" * len(product_ids))
+    with closing(_connect(path)) as con:
+        for r in con.execute(
+            f"""SELECT product_id, MAX(date) AS d FROM (
+                  SELECT i.product_id, o.date FROM order_items i JOIN orders o ON o.order_id = i.order_id
+                  WHERE o.status = 'delivered' AND i.product_id IN ({marks})
+                  UNION ALL
+                  SELECT m.product_id, r.date FROM receipt_items ri JOIN receipts r ON r.receipt_id = ri.receipt_id
+                  JOIN pos_map m ON m.pos_id = ri.pos_id WHERE m.product_id IN ({marks}))
+                GROUP BY product_id""",
+            (*product_ids, *product_ids),
+        ):
+            out[r["product_id"]] = r["d"]
+    return out

@@ -580,14 +580,15 @@ class AlbertHeijnApi:
         return out
 
     async def set_list_items(self, items: list[dict[str, Any]]) -> None:
-        """Put products on the AH shopping list with a quantity. AH upserts on productId and sets (not adds) the quantity."""
+        """Put products on the AH shopping list with a quantity. AH upserts on productId and sets (not adds) the quantity;
+        quantity 0 removes the product."""
         body = [
             {
                 "description": i.get("title") or str(i["product_id"]),
                 "searchTerm": i.get("title") or str(i["product_id"]),
                 "type": "SHOPPABLE",
                 "originCode": "PRD",
-                "quantity": int(i.get("quantity") or 1),
+                "quantity": int(i["quantity"]) if i.get("quantity") is not None else 1,
                 "strikeThrough": False,
                 "productId": int(i["product_id"]),
             }
