@@ -4,7 +4,7 @@
 
 A Home Assistant custom integration for Albert Heijn grocery delivery, providing order tracking sensors and voice control through Assist.
 
-## This fork (CBato, 0.11.3)
+## This fork (CBato, 0.12.0)
 
 Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) with:
 
@@ -12,7 +12,8 @@ Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) wi
   `order_items` (quantity, price, price without bonus, bonus, unit price), `products` (incl. AH's "Eerder gekocht"
   as `in_catalog`) and `prices` (weekly). The history keeps growing even when AH stops returning old orders.
   Synced shortly after start, once a day and after each delivery; catalog and prices once a week.
-  Cancelled orders are skipped (and removed if they were stored before).
+  Cancelled orders are skipped (and removed if they were stored before). Older orders come from the "Mijn bestellingen"
+  list (`/order/v1/summaries`, paged), which goes back further than `orderFulfillments` (max 10).
   A JSON history from 0.6/0.7 is imported once.
 - **`sensor.albert_heijn_vaak_besteld`** — number of products in the history, with the top 25
   (count, last ordered, average interval) as attribute.

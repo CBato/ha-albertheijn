@@ -278,6 +278,26 @@ class AlbertHeijnApi:
         self._access_token = data["access_token"]
         self._refresh_token = data["refresh_token"]
 
+    async def get_order_summaries(self, page: int = 0, size: int = 25) -> list[dict[str, Any]]:
+        """Order summaries as the AH app's "Mijn bestellingen" list (newest first, 25 per page by default):
+        order_id, date (delivery date), state, cancelled. Goes further back than orderFulfillments (max 10)."""
+        data = await self._request(
+            "GET", f"/mobile-services/order/v1/summaries?sortBy=DEFAULT&page={int(page)}&size={int(size)}"
+        )
+        rows = data if isinstance(data, list) else (data or {}).get("content") or (data or {}).get("orders") or []
+        out = []
+        for r in rows:
+            if not isinstance(r, dict) or not r.get("orderId"):
+                continue
+            state = str(r.get("state") or r.get("orderState") or "")
+            out.append({
+                "order_id": r["orderId"],
+                "date": str(r.get("deliveryDate") or "")[:10],
+                "state": state,
+                "cancelled": "cancel" in state.lower() or "annul" in state.lower(),
+            })
+        return out
+
     async def get_closed_fulfillments(self) -> list[dict[str, Any]]:
         """Get closed orders: order_id, date (delivery date), status, cancelled (True for cancelled orders).
 

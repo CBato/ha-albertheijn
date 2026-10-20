@@ -45,12 +45,12 @@ _PROBE_GRAPHQL = {
     "all": "orderFulfillments(status: ALL)",
 }
 _PROBE_REST = [
-    "/mobile-services/order/v1/summaries/complete?sortBy=DEFAULT",
     "/mobile-services/order/v1/summaries?sortBy=DEFAULT",
-    "/mobile-services/order/v1/summaries/closed?sortBy=DEFAULT",
-    "/mobile-services/order/v1/summaries/history?sortBy=DEFAULT",
-    "/mobile-services/order/v1/history",
-    "/mobile-services/order/v2/summaries?sortBy=DEFAULT",
+    "/mobile-services/order/v1/summaries?sortBy=DEFAULT&page=1",
+    "/mobile-services/order/v1/summaries?sortBy=DEFAULT&page=1&size=25",
+    "/mobile-services/order/v1/summaries?sortBy=DEFAULT&size=100",
+    "/mobile-services/order/v1/summaries?sortBy=DEFAULT&offset=25",
+    "/mobile-services/order/v1/summaries?sortBy=DEFAULT&pageNumber=1",
 ]
 
 ATTR_QUERY = "query"
@@ -252,8 +252,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         for path in _PROBE_REST:
             try:
                 data = await api._request("GET", path)
-                if isinstance(data, list):
-                    info: Any = {"list": len(data), "first": str(data[0])[:300] if data else None}
+                if isinstance(data, list) and data and isinstance(data[0], dict) and "deliveryDate" in data[0]:
+                    dates = sorted(str(r.get("deliveryDate") or "")[:10] for r in data)
+                    info: Any = {"orders": len(data), "from": dates[0], "to": dates[-1],
+                                 "first_id": data[0].get("orderId"), "last_id": data[-1].get("orderId"),
+                                 "states": sorted({str(r.get("state")) for r in data}),
+                                 "with_products": sum(1 for r in data if r.get("orderedProducts"))}
+                elif isinstance(data, list):
+                    info = {"list": len(data), "first": str(data[0])[:300] if data else None}
                 elif isinstance(data, dict):
                     info = {k: (len(v) if isinstance(v, list) else str(v)[:80]) for k, v in data.items()}
                 else:

@@ -34,6 +34,8 @@ PRICE_EVERY_DAYS = 7  # weekly price check
 PRICE_MAX_PRODUCTS = 2000
 PRICE_BATCH = 30
 CATALOG_EVERY_DAYS = 7
+SUMMARY_PAGE = 25
+SUMMARY_MAX_PAGES = 40  # 1000 orders
 RECEIPTS_PAGE = 50
 RECEIPTS_FIRST = 400  # the first sync imports at most this many till receipts (newest first)
 
@@ -164,6 +166,7 @@ class OrderHistory:
         self.suggestions: list[dict[str, Any]] = []
         self.next_delivery: str | None = None  # set by the coordinator
         self.cancelled = 0  # cancelled orders seen in the last sync (not counted)
+        self.summary_orders: int | None = None  # orders in the "Mijn bestellingen" list in the last sync
 
     async def _run(self, func, *args):
         return await self._hass.async_add_executor_job(func, self._path, *args)
@@ -205,6 +208,7 @@ class OrderHistory:
             "last_order": days[-1] if days else None,
             "receipts": len(rdays),
             "cancelled_skipped": self.cancelled,
+            "order_list_seen": self.summary_orders,
             "first_receipt": rdays[0] if rdays else None,
             "last_receipt": rdays[-1] if rdays else None,
             "products_ordered": sum(1 for p in self._frequent if p["count"]),
@@ -289,6 +293,7 @@ class OrderHistory:
                 self.closed_supported = False
                 closed = []
             self.cancelled = 0
+            cancelled_ids = {c["order_id"] for c in closed if c.get("cancelled")}
             for c in closed:
                 order_id, day = c["order_id"], c["date"]
                 if c.get("cancelled"):
@@ -302,6 +307,24 @@ class OrderHistory:
                 if await self._fetch_order(order_id, day, "delivered", now):
                     changed = True
                 await asyncio.sleep(REQUEST_PAUSE)
+
+            # 1b. Older orders from the "Mijn bestellingen" list (REST summaries, paged; goes back further)
+            try:
+                for c in await self._order_summaries():
+                    order_id, day = c["order_id"], c["date"]
+                    if c["cancelled"] or order_id in cancelled_ids:
+                        if order_id in known and await self._run(db.delete_order, order_id):
+                            changed = True
+                        continue
+                    if not day or day >= today or known.get(order_id) == "delivered":
+                        continue
+                    if await self._fetch_order(order_id, day, "delivered", now):
+                        known[order_id] = "delivered"
+                        changed = True
+                    await asyncio.sleep(REQUEST_PAUSE)
+            except AlbertHeijnApiError as err:
+                _LOGGER.debug("Order summaries not available: %s", err)
+                errors.append(f"Bestellijst: {err}")
 
             # 2. Snapshot of open orders with products; gone after their delivery date = delivered
             for f in open_orders:
@@ -364,6 +387,23 @@ class OrderHistory:
         if not items:
             return False
         return await self._run(db.save_order, int(order_id), day, status, [asdict(i) for i in items], now)
+
+    async def _order_summaries(self) -> list[dict[str, Any]]:
+        """All pages of the order list; stops when a page is empty, short, or repeats (paging not supported)."""
+        out: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for page in range(SUMMARY_MAX_PAGES):
+            rows = await self._api.get_order_summaries(page, SUMMARY_PAGE)
+            fresh = [r for r in rows if r["order_id"] not in seen]
+            if not fresh:
+                break
+            out.extend(fresh)
+            seen.update(r["order_id"] for r in fresh)
+            if len(rows) < SUMMARY_PAGE:
+                break
+            await asyncio.sleep(REQUEST_PAUSE)
+        self.summary_orders = len(out)
+        return out
 
     async def _fetch_receipts(self, now: str) -> bool:
         """Import new till receipts and map their till product ids to webshop products."""
