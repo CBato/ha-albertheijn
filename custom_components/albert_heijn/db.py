@@ -88,6 +88,24 @@ CREATE TABLE IF NOT EXISTS pos_map (
     pos_id INTEGER PRIMARY KEY,     -- till product id
     product_id INTEGER              -- webshop product id, -1 = not sold online
 );
+CREATE TABLE IF NOT EXISTS bonus_weeks (
+    week_start TEXT PRIMARY KEY,    -- Monday
+    week_end TEXT,
+    fetched TEXT
+);
+CREATE TABLE IF NOT EXISTS bonus_offers (
+    week_start TEXT NOT NULL,
+    product_id INTEGER NOT NULL,
+    mechanism TEXT,                 -- e.g. '1+1 gratis'
+    price REAL,                     -- price with the bonus (per item as AH lists it)
+    price_was REAL,                 -- normal price
+    title TEXT,
+    image_url TEXT,
+    group_title TEXT,               -- for group offers ("Alle Hak ...")
+    source TEXT,                    -- previously_bought / personal
+    PRIMARY KEY (week_start, product_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bonus_offers_product ON bonus_offers(product_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_product ON order_items(product_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status_date ON orders(status, date);
 """
@@ -624,3 +642,40 @@ def fill_product_details(path: str, rows: list[dict[str, Any]], now: str) -> int
             )
             n += cur.rowcount
     return n
+
+
+def save_bonus_week(path: str, start: str, end: str | None, offers: list[dict[str, Any]], now: str) -> int:
+    """Replace the stored offers of one bonus week."""
+    with closing(_connect(path)) as con, con:
+        con.execute(
+            """INSERT INTO bonus_weeks(week_start, week_end, fetched) VALUES(?, ?, ?)
+               ON CONFLICT(week_start) DO UPDATE SET week_end = excluded.week_end, fetched = excluded.fetched""",
+            (start, end, now),
+        )
+        con.execute("DELETE FROM bonus_offers WHERE week_start = ?", (start,))
+        con.executemany(
+            """INSERT OR IGNORE INTO bonus_offers(week_start, product_id, mechanism, price, price_was, title, image_url, group_title, source)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(start, o["product_id"], o.get("mechanism"), o.get("price"), o.get("price_was"), o.get("title"),
+              o.get("image_url"), o.get("group"), o.get("source")) for o in offers],
+        )
+        return len(offers)
+
+
+def bonus_weeks(path: str) -> list[dict[str, Any]]:
+    with closing(_connect(path)) as con:
+        return [dict(r) for r in con.execute("SELECT week_start, week_end, fetched FROM bonus_weeks ORDER BY week_start")]
+
+
+def bonus_offers(path: str, start: str) -> list[dict[str, Any]]:
+    with closing(_connect(path)) as con:
+        return [
+            dict(r)
+            for r in con.execute(
+                """SELECT b.product_id, b.mechanism, b.price, b.price_was, b.group_title, b.source,
+                          COALESCE(NULLIF(p.title, ''), b.title) AS title, COALESCE(p.image_url, b.image_url) AS image_url,
+                          p.category
+                   FROM bonus_offers b LEFT JOIN products p ON p.product_id = b.product_id WHERE b.week_start = ?""",
+                (start,),
+            )
+        ]

@@ -475,6 +475,46 @@ class AlbertHeijnApi:
 
         return [_product_from_raw(p) for p in data.get("products", []) if p.get("webshopId")]
 
+    async def get_bonus_periods(self) -> list[dict[str, str]]:
+        """Bonus weeks (Monday to Sunday): this week, and next week once AH has published it (a few days ahead)."""
+        data = await self._request("GET", "/mobile-services/bonuspage/v3/metadata")
+        return [
+            {"start": p.get("bonusStartDate"), "end": p.get("bonusEndDate")}
+            for p in (data or {}).get("periods") or []
+            if p.get("bonusStartDate")
+        ]
+
+    async def get_bonus_section(self, kind: str, start: str) -> list[dict[str, Any]]:
+        """Bonus offers of one week: kind "previously_bought" (bonus on what you bought before) or "personal".
+
+        Group offers ("Alle Hak ...") are expanded to their products.
+        """
+        if kind == "personal":
+            path = f"/mobile-services/bonuspage/v1/personal?bonusStartDate={start}"
+        else:
+            path = f"/mobile-services/bonuspage/v2/section/previously-bought?application=AHWEBSHOP&date={start}"
+        data = await self._request("GET", path)
+        out: list[dict[str, Any]] = []
+        for entry in (data or {}).get("bonusGroupOrProducts") or []:
+            if product := entry.get("product"):
+                if product.get("webshopId"):
+                    out.append({
+                        "product_id": product["webshopId"], "title": product.get("title") or "",
+                        "mechanism": product.get("bonusMechanism") or "Bonus",
+                        "price": product.get("currentPrice"), "price_was": product.get("priceBeforeBonus"),
+                        "image_url": _image_url(product), "group": None, "source": kind,
+                    })
+            elif group := entry.get("bonusGroup"):
+                for gp in group.get("products") or []:
+                    if gp.get("webshopId"):
+                        out.append({
+                            "product_id": gp["webshopId"], "title": gp.get("title") or "",
+                            "mechanism": group.get("discountDescription") or "Bonus",
+                            "price": gp.get("currentPrice"), "price_was": gp.get("priceBeforeBonus"),
+                            "image_url": _image_url(gp), "group": group.get("segmentDescription"), "source": kind,
+                        })
+        return out
+
     async def get_receipts(self, offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
         """Till receipts (in-store purchases with the bonus card), newest first: id, datetime, total."""
         query = """query FetchPosReceipts($offset: Int!, $limit: Int!) {

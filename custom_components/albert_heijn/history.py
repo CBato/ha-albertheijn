@@ -19,7 +19,7 @@ from homeassistant.util import dt as dt_util
 
 from . import db
 from .api import AlbertHeijnApi, AlbertHeijnApiError, Fulfillment
-from .suggest import REGULAR_DAYS, compute_suggestions, effective_price, week_start
+from .suggest import REGULAR_DAYS, compute_suggestions, effective_price, eur, parse_promo, week_start
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -179,6 +179,8 @@ class OrderHistory:
         self.next_delivery: str | None = None  # set by the coordinator
         self.cancelled = 0  # cancelled orders seen in the last sync (not counted)
         self.summary_orders: int | None = None  # orders in the "Mijn bestellingen" list in the last sync
+        self.bonus_periods: list[dict[str, Any]] = []
+        self.bonus_next: dict[str, Any] = {}  # cache for the sensor
 
     async def _run(self, func, *args):
         return await self._hass.async_add_executor_job(func, self._path, *args)
@@ -190,6 +192,7 @@ class OrderHistory:
         await self._refresh_cache()
         if week := self.meta.get("suggest_week"):
             self.suggestions = await self._run(db.get_suggestions, week)
+        self.bonus_next = await self.async_bonus("next")
 
     async def _import_old_store(self) -> None:
         """One-time import of the JSON history of fork 0.6/0.7 (.storage/albert_heijn.history.<entry>)."""
@@ -412,6 +415,14 @@ class OrderHistory:
                 _LOGGER.debug("Receipts not available: %s", err)
                 errors.append(f"Kassabonnen: {err}")
 
+            # 4b. Bonus of this week and (once published) next week, on what you bought before + personal
+            try:
+                if await self._fetch_bonus_weeks(now):
+                    changed = True
+            except AlbertHeijnApiError as err:
+                _LOGGER.debug("Bonus weeks not available: %s", err)
+                errors.append(f"Bonus: {err}")
+
             # rebuild the cache first: the price check uses the product list
             await self._refresh_cache()
 
@@ -426,6 +437,7 @@ class OrderHistory:
 
             self.meta["synced_at"] = now
             await self._run(db.set_meta, self.meta)
+            self.bonus_next = await self.async_bonus("next")
             self.last_error = "; ".join(errors) or None
             await self._refresh_cache()
             return changed
@@ -456,6 +468,56 @@ class OrderHistory:
             await asyncio.sleep(REQUEST_PAUSE)
         self.summary_orders = len(out)
         return out
+
+    async def _fetch_bonus_weeks(self, now: str) -> bool:
+        """Store the offers of every published bonus week (refreshed at most every 12 hours)."""
+        stored = {w["week_start"]: w for w in await self._run(db.bonus_weeks)}
+        changed = False
+        for period in await self._api.get_bonus_periods():
+            start = period["start"]
+            fetched = (stored.get(start) or {}).get("fetched") or ""
+            if fetched and fetched[:13] >= (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()[:13]:
+                continue
+            offers: list[dict[str, Any]] = []
+            for kind in ("personal", "previously_bought"):
+                try:
+                    offers += await self._api.get_bonus_section(kind, start)
+                except AlbertHeijnApiError as err:
+                    _LOGGER.debug("Bonus section %s %s not available: %s", kind, start, err)
+                await asyncio.sleep(REQUEST_PAUSE)
+            await self._run(db.save_bonus_week, start, period.get("end"), offers, now)
+            changed = True
+        self.bonus_periods = [p for p in await self._run(db.bonus_weeks)]
+        return changed
+
+    async def async_bonus(self, week: str = "current") -> dict[str, Any]:
+        """Bonus of this or next week on products you buy, with the deal against what you paid on average."""
+        today = date.today().isoformat()
+        weeks = await self._run(db.bonus_weeks)
+        current = [w for w in weeks if w["week_start"] <= today <= (w["week_end"] or "9999")]
+        later = [w for w in weeks if w["week_start"] > today]
+        chosen = (current[-1] if current else None) if week == "current" else (later[0] if later else None)
+        if not chosen:
+            return {"week": week, "available": False, "offers": []}
+        offers = await self._run(db.bonus_offers, chosen["week_start"])
+        avg = {r["product_id"]: r for r in await self._run(db.products_overview)}
+        rhythm = {p["product_id"]: p for p in self._frequent if p.get("count")}
+        out = []
+        for o in offers:
+            mine = avg.get(o["product_id"])
+            eff = effective_price(o["mechanism"], o["price"], o["price_was"])
+            paid = (mine or {}).get("avg_paid")
+            saving = round(1 - eff / paid, 2) if eff and paid else (round(1 - eff / o["price_was"], 2) if eff and o["price_was"] else None)
+            r = rhythm.get(o["product_id"]) or {}
+            out.append({
+                **o, "effective": eff, "avg_paid": paid, "saving": saving,
+                "group_size": (parse_promo(o["mechanism"]) or {}).get("group", 1),
+                "times": (mine or {}).get("times"), "every_weeks": r.get("every_weeks"), "due": r.get("due"),
+                "deal": f"{eur(eff)} p/st" + (f", je betaalt gemiddeld {eur(paid)}" if paid else "") if eff else None,
+            })
+        # best deals on things you buy regularly first
+        out.sort(key=lambda o: (-(o["times"] or 0) * max(o["saving"] or 0, 0), -(o["saving"] or 0)))
+        return {"week": week, "available": True, "week_start": chosen["week_start"], "week_end": chosen["week_end"], "offers": out}
 
     async def _fetch_receipts(self, now: str) -> bool:
         """Import new till receipts and map their till product ids to webshop products."""

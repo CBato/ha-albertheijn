@@ -46,6 +46,7 @@ async def async_setup_entry(
         AHOrderSpendingSensor(coordinator),
         AHFrequentlyOrderedSensor(coordinator),
         AHSuggestionsSensor(coordinator),
+        AHBonusNextWeekSensor(coordinator),
     ]
 
     async_add_entities(entities)
@@ -497,3 +498,35 @@ class AHSuggestionsSensor(AHBaseSensor):
         if not history:
             return {}
         return {"week": history.meta.get("suggest_week"), "items": history.suggestions}
+
+
+class AHBonusNextWeekSensor(AHBaseSensor):
+    """Next week's bonus on products you buy (available a few days before the bonus week starts)."""
+
+    _attr_name = "Bonus volgende week"
+    _attr_icon = "mdi:calendar-arrow-right"
+    _attr_native_unit_of_measurement = "deals"
+    _unrecorded_attributes = frozenset({"items"})
+
+    def __init__(self, coordinator: AlbertHeijnCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "bonus_next_week")
+
+    @property
+    def native_value(self) -> int | None:
+        """Good deals (5%+ cheaper than you pay on average) on products you bought before."""
+        nxt = (self.coordinator.history.bonus_next if self.coordinator.history else {}) or {}
+        if not nxt.get("available"):
+            return 0
+        return sum(1 for o in nxt["offers"] if o.get("times") and (o.get("saving") or 0) >= 0.05)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        nxt = (self.coordinator.history.bonus_next if self.coordinator.history else {}) or {}
+        keep = ("product_id", "title", "mechanism", "effective", "avg_paid", "saving", "times", "every_weeks", "image_url", "deal")
+        return {
+            "available": bool(nxt.get("available")),
+            "week_start": nxt.get("week_start"),
+            "week_end": nxt.get("week_end"),
+            "items": [{k: o.get(k) for k in keep} for o in (nxt.get("offers") or [])[:40]],
+        }

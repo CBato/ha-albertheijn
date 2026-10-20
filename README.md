@@ -4,7 +4,7 @@
 
 A Home Assistant custom integration for Albert Heijn grocery delivery, providing order tracking sensors and voice control through Assist.
 
-## This fork (CBato, 0.16.0)
+## This fork (CBato, 0.17.0)
 
 Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) with:
 
@@ -49,6 +49,10 @@ Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) wi
   categories (90 days), bonus savings and price movers (weekly prices, or paid list prices until there are enough).
 - **`albert_heijn.get_products`** — every product ever bought: last bought, times, average paid, current price and bonus,
   difference current vs average paid (for a product table with category filter).
+- **Bonus weeks** — this week's and (once AH publishes it, a few days ahead) next week's bonus on what you bought before
+  and your personal bonus are stored (`bonus_weeks`, `bonus_offers`). `albert_heijn.get_bonus` (week: current / next)
+  returns them with the deal against what you paid on average; `sensor.albert_heijn_bonus_volgende_week` counts the
+  good deals next week.
 - **`albert_heijn.sync_history`** — sync now; reports whether AH supports closed orders.
 - **`albert_heijn.lookup_barcode`** — barcode (EAN) → AH product.
 - **`albert_heijn.add_to_order`** — also works for a submitted (planned) order: it is reopened first and has to be

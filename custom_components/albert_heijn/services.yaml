@@ -257,3 +257,18 @@ get_products:
   description: >-
     Every product ever bought (delivery and store) - last bought, times, average paid per item (what was really paid),
     current price and bonus from the weekly check, and the difference between the current normal price and the average paid.
+
+get_bonus:
+  name: Get bonus
+  description: >-
+    Bonus of this week or next week (published a few days ahead) on products you bought before and your personal bonus,
+    with per product the price per item with the offer and the deal against what you paid on average.
+  fields:
+    week:
+      name: Week
+      default: current
+      selector:
+        select:
+          options:
+            - current
+            - next

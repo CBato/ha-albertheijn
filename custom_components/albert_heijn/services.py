@@ -33,6 +33,7 @@ SERVICE_PROBE_ORDER_HISTORY = "probe_order_history"
 SERVICE_GET_PRODUCT_HISTORY = "get_product_history"
 SERVICE_GET_INSIGHTS = "get_insights"
 SERVICE_GET_PRODUCTS = "get_products"
+SERVICE_GET_BONUS = "get_bonus"
 
 # Variants to find out how far back AH returns delivered orders (introspection is disabled at AH)
 _PROBE_GRAPHQL = {
@@ -290,6 +291,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Failed to fill the list: {err}") from err
 
+    async def handle_get_bonus(call: ServiceCall) -> ServiceResponse:
+        """Bonus of this or next week on products you buy, with the deal against what you paid on average."""
+        coordinator = _get_coordinator(hass)
+        if not coordinator.history:
+            raise HomeAssistantError("Order history not available")
+        return await coordinator.history.async_bonus(call.data.get("week", "current"))
+
     async def handle_get_products(call: ServiceCall) -> ServiceResponse:
         """Every product ever bought: last bought, times, average paid, current price and bonus, difference."""
         coordinator = _get_coordinator(hass)
@@ -408,6 +416,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_GET_BONUS,
+        handle_get_bonus,
+        schema=vol.Schema({vol.Optional("week", default="current"): vol.In(["current", "next"])}),
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_GET_PRODUCTS,
         handle_get_products,
         supports_response=SupportsResponse.ONLY,
@@ -464,5 +480,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_GET_PRODUCT_HISTORY,
         SERVICE_GET_INSIGHTS,
         SERVICE_GET_PRODUCTS,
+        SERVICE_GET_BONUS,
     ):
         hass.services.async_remove(DOMAIN, service)
