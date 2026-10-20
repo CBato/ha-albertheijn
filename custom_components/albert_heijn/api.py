@@ -278,8 +278,8 @@ class AlbertHeijnApi:
         self._access_token = data["access_token"]
         self._refresh_token = data["refresh_token"]
 
-    async def get_closed_fulfillments(self) -> list[tuple[int, str]]:
-        """Get delivered (closed) orders as (order_id, delivery date).
+    async def get_closed_fulfillments(self) -> list[dict[str, Any]]:
+        """Get closed orders: order_id, date (delivery date), status, cancelled (True for cancelled orders).
 
         Not documented by AH; raises AlbertHeijnApiError if the status does not exist.
         """
@@ -287,16 +287,25 @@ class AlbertHeijnApi:
   orderFulfillments(status: CLOSED) {
     result {
       orderId
+      statusCode
+      statusDescription
       delivery { slot { date } }
     }
   }
 }"""
         data = await self._graphql(query)
-        return [
-            (r["orderId"], ((r.get("delivery") or {}).get("slot") or {}).get("date", ""))
-            for r in (data.get("orderFulfillments") or {}).get("result") or []
-            if r.get("orderId")
-        ]
+        out = []
+        for r in (data.get("orderFulfillments") or {}).get("result") or []:
+            if not r.get("orderId"):
+                continue
+            code, desc = str(r.get("statusCode") or ""), str(r.get("statusDescription") or "")
+            out.append({
+                "order_id": r["orderId"],
+                "date": ((r.get("delivery") or {}).get("slot") or {}).get("date", ""),
+                "status": desc or code,
+                "cancelled": "cancel" in code.lower() or "annul" in desc.lower(),
+            })
+        return out
 
     async def get_fulfillments(self) -> list[Fulfillment]:
         """Get all open order fulfillments."""

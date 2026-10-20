@@ -163,6 +163,7 @@ class OrderHistory:
         self.last_error: str | None = None
         self.suggestions: list[dict[str, Any]] = []
         self.next_delivery: str | None = None  # set by the coordinator
+        self.cancelled = 0  # cancelled orders seen in the last sync (not counted)
 
     async def _run(self, func, *args):
         return await self._hass.async_add_executor_job(func, self._path, *args)
@@ -203,6 +204,7 @@ class OrderHistory:
             "first_order": days[0] if days else None,
             "last_order": days[-1] if days else None,
             "receipts": len(rdays),
+            "cancelled_skipped": self.cancelled,
             "first_receipt": rdays[0] if rdays else None,
             "last_receipt": rdays[-1] if rdays else None,
             "products_ordered": sum(1 for p in self._frequent if p["count"]),
@@ -286,7 +288,15 @@ class OrderHistory:
                 _LOGGER.debug("Closed orders not available: %s", err)
                 self.closed_supported = False
                 closed = []
-            for order_id, day in closed:
+            self.cancelled = 0
+            for c in closed:
+                order_id, day = c["order_id"], c["date"]
+                if c.get("cancelled"):
+                    # cancelled orders never count; remove one we stored earlier (e.g. as an open snapshot)
+                    self.cancelled += 1
+                    if order_id in known and await self._run(db.delete_order, order_id):
+                        changed = True
+                    continue
                 if known.get(order_id) == "delivered":
                     continue
                 if await self._fetch_order(order_id, day, "delivered", now):

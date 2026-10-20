@@ -356,3 +356,8 @@ def get_suggestions(path: str, week: str) -> list[dict[str, Any]]:
             }
             for r in con.execute("SELECT * FROM suggestions WHERE week = ? ORDER BY added_at, rowid", (week,))
         ]
+
+
+def delete_order(path: str, order_id: int) -> bool:
+    with closing(_connect(path)) as con, con:
+        return con.execute("DELETE FROM orders WHERE order_id = ?", (order_id,)).rowcount > 0
