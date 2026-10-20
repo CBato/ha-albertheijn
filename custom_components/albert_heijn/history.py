@@ -33,6 +33,8 @@ REQUEST_PAUSE = 0.3  # seconds between requests to AH during a sync
 PRICE_EVERY_DAYS = 7  # weekly price check
 PRICE_MAX_PRODUCTS = 2000
 PRICE_BATCH = 30
+DETAILS_EVERY_DAYS = 7  # a product without title/category/image is looked up at AH at most once a week
+DETAILS_MAX = 1000  # per sync
 CATALOG_EVERY_DAYS = 7
 SUMMARY_PAGE = 25
 SUMMARY_MAX_PAGES = 40  # 1000 orders
@@ -183,6 +185,7 @@ class OrderHistory:
         self.summary_orders: int | None = None  # orders in the "Mijn bestellingen" list in the last sync
         self.bonus_periods: list[dict[str, Any]] = []
         self.bonus_next: dict[str, Any] = {}  # cache for the sensor
+        self.details_missing: int | None = None  # products still without title or category after the last sync
 
     async def _run(self, func, *args):
         return await self._hass.async_add_executor_job(func, self._path, *args)
@@ -236,6 +239,7 @@ class OrderHistory:
             "catalog": len(snap["catalog"]),
             "products": snap["products"],
             "price_points": snap["price_points"],
+            "details_missing": self.details_missing,
             "synced_at": self.meta.get("synced_at"),
             "prices_at": self.meta.get("prices_at"),
             "catalog_at": self.meta.get("catalog_at"),
@@ -500,6 +504,15 @@ class OrderHistory:
                     self.meta["prices_at"] = now
                     changed = True
 
+            # 6. Missing product details (title, category, image), e.g. for products only known from a till receipt;
+            #    what the price check just looked up is skipped
+            try:
+                if await self._fetch_details(now):
+                    changed = True
+            except AlbertHeijnApiError as err:
+                _LOGGER.debug("Product details not available: %s", err)
+                errors.append(f"Productgegevens: {err}")
+
             self.meta["synced_at"] = now
             await self._run(db.set_meta, self.meta)
             self.bonus_next = await self.async_bonus("next")
@@ -612,6 +625,19 @@ class OrderHistory:
             await self._run(db.save_pos_map, mapping)
         return bool(new) or bool(unmapped)
 
+    async def _fetch_details(self, now: str) -> bool:
+        """Look up products that lack a title, category or image (each at most once every DETAILS_EVERY_DAYS)."""
+        tried_before = (datetime.now(timezone.utc) - timedelta(days=DETAILS_EVERY_DAYS)).isoformat()
+        ids = await self._run(db.missing_details, tried_before, DETAILS_MAX)
+        filled = 0
+        for i in range(0, len(ids), PRICE_BATCH):
+            batch = ids[i : i + PRICE_BATCH]
+            filled += await self._run(db.fill_product_details, await self._api.get_prices(batch), now)
+            await self._run(db.mark_details_tried, batch, now)
+            await asyncio.sleep(REQUEST_PAUSE)
+        self.details_missing = await self._run(db.count_missing_details)
+        return filled > 0
+
     async def _fetch_prices(self, today: str) -> tuple[int, str | None]:
         ids = [int(p["product_id"]) for p in self._frequent[:PRICE_MAX_PRODUCTS] if p.get("product_id")]
         ids = list(dict.fromkeys(ids))
@@ -626,5 +652,6 @@ class OrderHistory:
                 r["effective"] = effective_price(r.get("bonus"), r.get("price"), r.get("price_before_bonus"))
             got += await self._run(db.save_prices, today, rows)
             await self._run(db.fill_product_details, rows, _now())
+            await self._run(db.mark_details_tried, ids[i : i + PRICE_BATCH], _now())  # the price check is a lookup too
             await asyncio.sleep(REQUEST_PAUSE)
         return got, None

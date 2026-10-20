@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS products (
     category TEXT,
     image_url TEXT,
     in_catalog INTEGER NOT NULL DEFAULT 0,  -- in AH's "Eerder gekocht"
-    updated TEXT
+    updated TEXT,
+    details_tried TEXT              -- last time missing details were looked up at AH (at most weekly)
 );
 CREATE TABLE IF NOT EXISTS prices (
     product_id INTEGER NOT NULL,
@@ -143,6 +144,9 @@ def init(path: str) -> None:
         cols = {r["name"] for r in con.execute("PRAGMA table_info(prices)")}
         if "effective" not in cols:
             con.execute("ALTER TABLE prices ADD COLUMN effective REAL")
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(products)")}
+        if "details_tried" not in cols:
+            con.execute("ALTER TABLE products ADD COLUMN details_tried TEXT")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(suggestions)")}
         if "done_at" not in cols:
             con.execute("ALTER TABLE suggestions ADD COLUMN done_at TEXT")
@@ -275,7 +279,7 @@ def load_for_frequent(path: str) -> dict[str, Any]:
                    LEFT JOIN products p ON p.product_id = i.product_id
                    WHERE o.status = 'delivered'
                    UNION ALL
-                   SELECT r.date, 'winkel' AS source, m.product_id, ri.quantity, COALESCE(p.title, ri.name), p.brand, p.unit_size,
+                   SELECT r.date, 'winkel' AS source, m.product_id, ri.quantity, COALESCE(NULLIF(p.title, ''), ri.name), p.brand, p.unit_size,
                           p.category, p.image_url
                    FROM receipts r JOIN receipt_items ri ON ri.receipt_id = r.receipt_id
                    JOIN pos_map m ON m.pos_id = ri.pos_id AND m.product_id > 0
@@ -459,6 +463,7 @@ def insights(path: str, today: str, weeks: int = 12) -> dict[str, Any]:
         weekly = [dict(r) for r in con.execute(
             "SELECT product_id, date, price, bonus FROM prices WHERE date >= ? ORDER BY date",
             ((t - timedelta(days=180)).isoformat(),))]
+        till_names = _till_names(con)
         titles = {r["product_id"]: (r["title"], r["image_url"]) for r in con.execute("SELECT product_id, title, image_url FROM products")}
 
     def line_cost(r: dict[str, Any]) -> float:
@@ -548,12 +553,60 @@ def insights(path: str, today: str, weeks: int = 12) -> dict[str, Any]:
         ref_d, ref_p = ref[0]
         if ref_p and abs(last_p - ref_p) >= 0.05:
             title, img = titles.get(pid, ("", None))
+            title = _title(title, till_names.get(pid), pid)
             movers.append({"product_id": pid, "title": title, "image_url": img, "from": ref_p, "to": last_p,
                            "pct": round((last_p - ref_p) / ref_p * 100, 1), "since": ref_d})
     up = sorted([m for m in movers if m["pct"] > 0], key=lambda m: -m["pct"])[:6]
     down = sorted([m for m in movers if m["pct"] < 0], key=lambda m: m["pct"])[:6]
     return {"month": cur, "prev_month": prev, "weeks": week_list, "top": top, "categories": categories,
             "best_deals": best, "movers": {"source": source, "up": up, "down": down}}
+
+
+def _till_names(con: sqlite3.Connection) -> dict[int, str]:
+    """Name on the till receipt per webshop product ("AH APPELSAP"), for products AH no longer shows."""
+    return {r["product_id"]: r["name"] for r in con.execute(
+        """SELECT m.product_id, MAX(ri.name) AS name FROM receipt_items ri JOIN pos_map m ON m.pos_id = ri.pos_id
+           WHERE m.product_id > 0 AND ri.name != '' GROUP BY m.product_id""")}
+
+
+def _title(title: str | None, till_name: str | None, product_id: int) -> str:
+    """Title, else the till receipt name ("AH APPELSAP" -> "AH appelsap"), else "Product <id>"."""
+    if title and not title.startswith("Product "):
+        return title
+    if till_name:
+        first, _, rest = till_name.strip().partition(" ")
+        return f"{first} {rest.lower()}".strip() if first.isupper() and len(first) <= 3 else till_name.strip().capitalize()
+    return title or f"Product {product_id}"
+
+
+def missing_details(path: str, tried_before: str, limit: int) -> list[int]:
+    """Products we bought or price-check that lack a title, category or image, not looked up since tried_before."""
+    with closing(_connect(path)) as con:
+        return [r["id"] for r in con.execute(
+            """SELECT id FROM (
+                 SELECT product_id AS id FROM order_items
+                 UNION SELECT product_id FROM pos_map WHERE product_id > 0
+                 UNION SELECT product_id FROM prices
+                 UNION SELECT product_id FROM products) ids
+               LEFT JOIN products p ON p.product_id = ids.id
+               WHERE (p.product_id IS NULL OR p.title IS NULL OR p.title = '' OR p.title LIKE 'Product %'
+                      OR p.category IS NULL OR p.category = '' OR p.image_url IS NULL)
+                 AND (p.details_tried IS NULL OR p.details_tried < ?)
+               LIMIT ?""", (tried_before, limit))]
+
+
+def mark_details_tried(path: str, product_ids: list[int], now: str) -> None:
+    with closing(_connect(path)) as con, con:
+        for pid in product_ids:
+            con.execute("INSERT OR IGNORE INTO products(product_id, in_catalog, updated) VALUES(?, 0, ?)", (pid, now))
+        con.executemany("UPDATE products SET details_tried = ? WHERE product_id = ?", [(now, pid) for pid in product_ids])
+
+
+def count_missing_details(path: str) -> int:
+    with closing(_connect(path)) as con:
+        return con.execute(
+            """SELECT COUNT(*) FROM products WHERE title IS NULL OR title = '' OR title LIKE 'Product %'
+                 OR category IS NULL OR category = ''""").fetchone()[0]
 
 
 def products_overview(path: str) -> list[dict[str, Any]]:
@@ -570,6 +623,7 @@ def products_overview(path: str) -> list[dict[str, Any]]:
                JOIN pos_map m ON m.pos_id = ri.pos_id AND m.product_id > 0""")]
         products = {r["product_id"]: dict(r) for r in con.execute(
             "SELECT product_id, title, brand, unit_size, category, image_url, in_catalog FROM products")}
+        till_names = _till_names(con)
         latest = {r["product_id"]: dict(r) for r in con.execute(
             "SELECT product_id, price, price_before_bonus, bonus, effective, MAX(date) AS d FROM prices GROUP BY product_id")}
     agg: dict[int, dict[str, Any]] = {}
@@ -591,7 +645,7 @@ def products_overview(path: str) -> list[dict[str, Any]]:
         normal = lp.get("price_before_bonus") or lp.get("price")
         cat = prod.get("category") or ""
         out.append({
-            "product_id": pid, "title": prod.get("title") or f"Product {pid}", "brand": prod.get("brand"),
+            "product_id": pid, "title": _title(prod.get("title"), till_names.get(pid), pid), "brand": prod.get("brand"),
             "unit_size": prod.get("unit_size"), "image_url": prod.get("image_url"),
             "category": cat.split("/")[0].strip() if cat else "Overig", "subcategory": cat.split("/", 1)[1].strip() if "/" in cat else None,
             "times": len(a["days"]), "quantity": round(a["qty"], 1), "last_bought": a["last"],
