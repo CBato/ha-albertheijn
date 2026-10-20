@@ -80,8 +80,11 @@ def effective_price(mechanism: str | None, price: float | None, before: float | 
     return price
 
 
-def bonus_check(series: list[dict[str, Any]], today: date) -> dict[str, Any]:
-    """Judge the current bonus of one product from its weekly prices (oldest first).
+def bonus_check(series: list[dict[str, Any]], today: date, avg_paid: float | None = None) -> dict[str, Any]:
+    """Judge the current bonus of one product.
+
+    With avg_paid (what you really paid per item on average): the offer price per item against that, the same
+    comparison as the Producten table in the app. Without it: against the normal price of the last 90 days.
 
     status: 'echt' (real discount), 'let_op' (normal price raised just before the bonus, or hardly any saving),
     'onbekend' (not enough price history yet) or 'geen' (not in the bonus this week).
@@ -97,6 +100,15 @@ def bonus_check(series: list[dict[str, Any]], today: date) -> dict[str, Any]:
     promo = parse_promo(mech) or {"group": 1}
     eff = effective_price(mech, cur.get("p"), cur.get("b"))
     res: dict[str, Any] = {"status": "onbekend", "mechanism": mech, "group": promo["group"], "effective": eff}
+    if avg_paid and eff:
+        saving = round(1 - eff / avg_paid, 2)
+        res.update({"normal": avg_paid, "saving": saving})
+        txt = f"{eur(eff)} p/st, je betaalt gemiddeld {eur(avg_paid)}"
+        if saving >= 0.05:
+            res.update({"status": "echt", "text": f"{txt}: {round(saving * 100)}% voordeel"})
+        else:
+            res.update({"status": "let_op", "text": f"{txt}: {'nauwelijks voordeel' if saving >= 0 else 'duurder dan normaal voor jou'}"})
+        return res
     since = (today - timedelta(days=REGULAR_DAYS)).isoformat()
     regular = [x["p"] for x in series[:-1] if not x.get("bonus") and x.get("p") and x.get("d", "") >= since]
     before = cur.get("b") or cur.get("p")
@@ -142,6 +154,7 @@ def compute_suggestions(
     min_count: int = 3,
     min_share: float = 0.3,
     max_items: int = 25,
+    avg_paid: dict[int, float] | None = None,
 ) -> list[dict[str, Any]]:
     """What to put on the list this week, how many, and why.
 
@@ -157,7 +170,7 @@ def compute_suggestions(
             continue
         regular = p["count"] >= min_count and (p.get("share") or 0) >= min_share
         due = bool(p.get("due")) and regular
-        bonus = bonus_check(series.get(pid, []), today)
+        bonus = bonus_check(series.get(pid, []), today, (avg_paid or {}).get(pid))
         status = bonus["status"]
         usual = max(1, int(p.get("usual_qty") or 1))
         per_week = p.get("per_week") or usual

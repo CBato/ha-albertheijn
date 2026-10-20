@@ -4,7 +4,7 @@
 
 A Home Assistant custom integration for Albert Heijn grocery delivery, providing order tracking sensors and voice control through Assist.
 
-## This fork (CBato, 0.15.1)
+## This fork (CBato, 0.16.0)
 
 Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) with:
 
@@ -27,8 +27,8 @@ Fork of [dpvdberg/ha-albertheijn](https://github.com/dpvdberg/ha-albertheijn) wi
   that is a real discount (the price before the bonus is compared with the normal price of the last 90 days).
   `sensor.albert_heijn_voorstellen` lists what was added this week and why. `dry_run: true` only shows them.
 - **Bonus mechanisms understood** — 1+1 / 2+1 gratis, 2e halve prijs, 2e gratis, "2 voor 5,00", % and € korting give an
-  effective price per item. The bonus check compares that with the normal price of the last 90 days (a price raised just
-  before the bonus is seen through). `fill_list` rounds quantities up to the bonus and stocks up on a real saving of 20%+
+  effective price per item. The bonus check compares that with what you really paid per item on average (the same
+  comparison as a product table in a dashboard); without purchase history with the normal price of the last 90 days. `fill_list` rounds quantities up to the bonus and stocks up on a real saving of 20%+
   (about 2 weeks, fresh products 1 week); the reason says how many and why.
 - **Stock-based rhythm** — a product is due when the last purchase (quantity / use per week) runs out before the delivery
   after the next one, so a bonus stock-up is taken into account.

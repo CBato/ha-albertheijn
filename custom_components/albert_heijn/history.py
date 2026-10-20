@@ -302,8 +302,10 @@ class OrderHistory:
         frequent = [p for p in self._frequent if p.get("count")]
         since = (today - timedelta(days=REGULAR_DAYS + 7)).isoformat()
         series = await self._run(db.price_series, [p["product_id"] for p in frequent], since)
+        # a bonus is judged against what you really paid on average (same as the Producten table in the app)
+        avg_paid = {r["product_id"]: r["avg_paid"] for r in await self._run(db.products_overview) if r.get("avg_paid")}
         rows = await self._hass.async_add_executor_job(
-            compute_suggestions, frequent, series, on_list | set(in_order) | before, today, min_count, min_share, max_items
+            compute_suggestions, frequent, series, on_list | set(in_order) | before, today, min_count, min_share, max_items, avg_paid
         )
         if rows and not dry_run:
             await self._api.set_list_items(rows)
