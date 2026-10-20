@@ -291,8 +291,16 @@ cleanup_suggestions:
   name: Clean up old suggestions
   description: >-
     Remove automatically added suggestions that were left on the list for a number of days: only when still on the
-    list with exactly the suggested quantity, not ticked, not in the order and not bought since.
+    list with exactly the suggested quantity, not ticked, not in the order and not bought since. A removed product
+    is not suggested again for snooze_days.
   fields:
+    snooze_days:
+      name: Snooze days
+      default: 7
+      selector:
+        number:
+          min: 0
+          max: 365
     days:
       name: Days
       default: 14

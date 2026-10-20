@@ -38,7 +38,6 @@ SUMMARY_PAGE = 25
 SUMMARY_MAX_PAGES = 40  # 1000 orders
 RECEIPTS_PAGE = 50
 RECEIPTS_FIRST = 400  # the first sync imports at most this many till receipts (newest first)
-CLEANUP_SNOOZE_DAYS = 28  # a suggestion the cleanup removed is not suggested again for 4 weeks
 
 
 def _now() -> str:
@@ -342,12 +341,15 @@ class OrderHistory:
             "skipped": {"on_list": len(on_list), "in_order": len(in_order), "earlier_this_week": len(before)},
         }
 
-    async def async_cleanup_suggestions(self, in_order: set[int], days: int = 14, dry_run: bool = False) -> dict[str, Any]:
+    async def async_cleanup_suggestions(
+        self, in_order: set[int], days: int = 14, dry_run: bool = False, snooze_days: int = 7
+    ) -> dict[str, Any]:
         """Remove automatically added suggestions that were left on the list for `days` days.
 
         Only when the product is still on the list with exactly the suggested quantity (so nobody changed it), not
         ticked, not in the order and not bought since. What you added yourself is never touched. A removed product is
-        snoozed for CLEANUP_SNOOZE_DAYS, otherwise the next fill_list (still "due") would put it straight back.
+        snoozed for `snooze_days` (default: until next week), otherwise the next fill_list (still "due") would put it
+        straight back; after that it is suggested again if it is still due.
         Compared by date, so the Monday run cleans what the Monday fill of two weeks ago added.
         """
         today = date.today()
@@ -369,7 +371,7 @@ class OrderHistory:
         if not dry_run:
             if remove:
                 await self._api.set_list_items([{"product_id": s["product_id"], "title": s["title"], "quantity": 0} for s in remove])
-                until = (today + timedelta(days=CLEANUP_SNOOZE_DAYS)).isoformat()
+                until = (today + timedelta(days=snooze_days)).isoformat()
                 for s in remove:
                     await self._run(db.set_snooze, s["product_id"], until)
             await self._run(db.mark_suggestions_done, done, _now())

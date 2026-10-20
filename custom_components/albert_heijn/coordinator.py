@@ -174,12 +174,12 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
         self.async_update_listeners()
         return result
 
-    async def async_cleanup_suggestions(self, days: int = 14, dry_run: bool = False) -> dict:
+    async def async_cleanup_suggestions(self, days: int = 14, dry_run: bool = False, snooze_days: int = 7) -> dict:
         """Remove suggestions that were left on the list (see history.async_cleanup_suggestions)."""
         if not self.history:
             raise AlbertHeijnApiError("Order history not available")
         in_order = {i.product_id for i in self.data.next_order_items} if self.data else set()
-        result = await self.history.async_cleanup_suggestions(in_order, days, dry_run)
+        result = await self.history.async_cleanup_suggestions(in_order, days, dry_run, snooze_days)
         self._update_tokens()
         return result
 

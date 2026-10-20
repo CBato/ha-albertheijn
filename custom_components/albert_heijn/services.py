@@ -124,6 +124,7 @@ CLEANUP_SUGGESTIONS_SCHEMA = vol.Schema(
     {
         vol.Optional("days", default=14): vol.All(vol.Coerce(int), vol.Range(min=1, max=90)),
         vol.Optional("dry_run", default=False): cv.boolean,
+        vol.Optional("snooze_days", default=7): vol.All(vol.Coerce(int), vol.Range(min=0, max=365)),
     }
 )
 
@@ -260,7 +261,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         """Remove automatically added suggestions that were left on the list for `days` days."""
         coordinator = _get_coordinator(hass)
         try:
-            return await coordinator.async_cleanup_suggestions(call.data["days"], call.data["dry_run"])
+            return await coordinator.async_cleanup_suggestions(call.data["days"], call.data["dry_run"], call.data["snooze_days"])
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Cleanup failed: {err}") from err
 
