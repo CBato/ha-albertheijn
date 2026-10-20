@@ -238,3 +238,16 @@ get_product_history:
         number:
           min: 1
           mode: box
+
+get_insights:
+  name: Get insights
+  description: Spending this month and last month, per week (delivery / store), biggest items and categories (90 days), bonus savings and price movers.
+  fields:
+    weeks:
+      name: Weeks
+      description: How many weeks in the per-week overview.
+      default: 12
+      selector:
+        number:
+          min: 4
+          max: 52

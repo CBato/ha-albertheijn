@@ -31,6 +31,7 @@ SERVICE_FILL_LIST = "fill_list"
 SERVICE_GRAPHQL_QUERY = "graphql_query"
 SERVICE_PROBE_ORDER_HISTORY = "probe_order_history"
 SERVICE_GET_PRODUCT_HISTORY = "get_product_history"
+SERVICE_GET_INSIGHTS = "get_insights"
 
 # Variants to find out how far back AH returns delivered orders (introspection is disabled at AH)
 _PROBE_GRAPHQL = {
@@ -288,6 +289,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Failed to fill the list: {err}") from err
 
+    async def handle_get_insights(call: ServiceCall) -> ServiceResponse:
+        """Spending this month, per week, biggest items, categories, bonus savings and price movers."""
+        coordinator = _get_coordinator(hass)
+        if not coordinator.history:
+            raise HomeAssistantError("Order history not available")
+        return await coordinator.history.async_insights(call.data.get("weeks", 12))
+
     async def handle_get_product_history(call: ServiceCall) -> ServiceResponse:
         """One product: details, every purchase (delivery + store) with price, weekly prices, rhythm and totals."""
         coordinator = _get_coordinator(hass)
@@ -392,6 +400,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_GET_INSIGHTS,
+        handle_get_insights,
+        schema=vol.Schema({vol.Optional("weeks", default=12): vol.All(vol.Coerce(int), vol.Range(min=4, max=52))}),
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_GET_PRODUCT_HISTORY,
         handle_get_product_history,
         schema=PRICE_HISTORY_SCHEMA,
@@ -431,5 +447,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_GRAPHQL_QUERY,
         SERVICE_PROBE_ORDER_HISTORY,
         SERVICE_GET_PRODUCT_HISTORY,
+        SERVICE_GET_INSIGHTS,
     ):
         hass.services.async_remove(DOMAIN, service)

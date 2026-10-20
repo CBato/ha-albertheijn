@@ -425,3 +425,128 @@ def product_history(path: str, product_id: int) -> dict[str, Any]:
         ]
     purchases.sort(key=lambda x: x["date"])
     return {"product": dict(prod) if prod else {"product_id": product_id}, "purchases": purchases, "prices": prices}
+
+
+def insights(path: str, today: str, weeks: int = 12) -> dict[str, Any]:
+    """Spending overview: this month, per week, biggest items, categories, bonus savings and price movers.
+
+    Spending: deliveries at what was really paid (order_items.effective), store visits at the receipt total.
+    """
+    from datetime import date, timedelta
+
+    t = date.fromisoformat(today)
+    month_start = t.replace(day=1)
+    prev_start = (month_start - timedelta(days=1)).replace(day=1)
+    week0 = t - timedelta(days=t.weekday()) - timedelta(weeks=weeks - 1)
+    since90 = (t - timedelta(days=90)).isoformat()
+    with closing(_connect(path)) as con:
+        order_rows = [dict(r) for r in con.execute(
+            """SELECT o.order_id, o.date, i.product_id, i.quantity, COALESCE(i.effective, i.price) AS paid, i.price,
+                      i.price_before_bonus AS before, i.bonus, p.title, p.category, p.image_url
+               FROM order_items i JOIN orders o ON o.order_id = i.order_id
+               LEFT JOIN products p ON p.product_id = i.product_id WHERE o.status = 'delivered'""")]
+        receipts = [dict(r) for r in con.execute("SELECT receipt_id, date, total FROM receipts")]
+        receipt_rows = [dict(r) for r in con.execute(
+            """SELECT r.date, m.product_id, ri.quantity, ri.amount AS paid, COALESCE(p.title, ri.name) AS title,
+                      p.category, p.image_url
+               FROM receipt_items ri JOIN receipts r ON r.receipt_id = ri.receipt_id
+               JOIN pos_map m ON m.pos_id = ri.pos_id AND m.product_id > 0
+               LEFT JOIN products p ON p.product_id = m.product_id""")]
+        weekly = [dict(r) for r in con.execute(
+            "SELECT product_id, date, price, bonus FROM prices WHERE date >= ? ORDER BY date",
+            ((t - timedelta(days=180)).isoformat(),))]
+        titles = {r["product_id"]: (r["title"], r["image_url"]) for r in con.execute("SELECT product_id, title, image_url FROM products")}
+
+    def line_cost(r: dict[str, Any]) -> float:
+        return (r.get("paid") or 0) * float(r.get("quantity") or 0)
+
+    def month(lo: date, hi: date) -> dict[str, Any]:
+        lo_s, hi_s = lo.isoformat(), hi.isoformat()
+        rows = [r for r in order_rows if lo_s <= r["date"] < hi_s]
+        orders = {r["order_id"] for r in rows}
+        delivery = sum(line_cost(r) for r in rows)
+        store = sum(r["total"] or 0 for r in receipts if lo_s <= r["date"] < hi_s)
+        saved = sum(max(0.0, (r["before"] or r["price"] or 0) - (r["paid"] or 0)) * float(r["quantity"] or 0)
+                    for r in rows if r.get("bonus"))
+        n_receipts = sum(1 for r in receipts if lo_s <= r["date"] < hi_s)
+        return {"from": lo_s, "spent": round(delivery + store, 2), "delivery": round(delivery, 2),
+                "store": round(store, 2), "orders": len(orders), "receipts": n_receipts,
+                "avg_order": round(delivery / len(orders), 2) if orders else None, "saved": round(saved, 2)}
+
+    next_month = (month_start + timedelta(days=32)).replace(day=1)
+    cur, prev = month(month_start, next_month), month(prev_start, month_start)
+
+    week_list = []
+    for w in range(weeks):
+        lo = week0 + timedelta(weeks=w)
+        hi = lo + timedelta(days=7)
+        lo_s, hi_s = lo.isoformat(), hi.isoformat()
+        d = sum(line_cost(r) for r in order_rows if lo_s <= r["date"] < hi_s)
+        st = sum(r["total"] or 0 for r in receipts if lo_s <= r["date"] < hi_s)
+        week_list.append({"week": lo_s, "delivery": round(d, 2), "store": round(st, 2)})
+
+    # biggest items and categories, last 90 days (deliveries at paid price, store lines at their amount)
+    spend: dict[int, dict[str, Any]] = {}
+    cats: dict[str, float] = {}
+    for src, rows in (("bezorging", order_rows), ("winkel", receipt_rows)):
+        for r in rows:
+            if r["date"] < since90 or not r.get("product_id"):
+                continue
+            cost = line_cost(r) if src == "bezorging" else (r.get("paid") or 0)
+            e = spend.setdefault(r["product_id"], {"product_id": r["product_id"], "title": r.get("title") or "",
+                                                   "image_url": r.get("image_url"), "spent": 0.0, "quantity": 0.0})
+            e["spent"] += cost
+            e["quantity"] += float(r.get("quantity") or 0)
+            cat = (r.get("category") or "Overig").split("/")[0].strip() or "Overig"
+            cats[cat] = cats.get(cat, 0.0) + cost
+    top = sorted(spend.values(), key=lambda e: -e["spent"])[:12]
+    for e in top:
+        e["spent"], e["quantity"] = round(e["spent"], 2), round(e["quantity"], 1)
+    total_cat = sum(cats.values()) or 1
+    categories = [{"name": k, "spent": round(v, 2), "share": round(v / total_cat, 3)}
+                  for k, v in sorted(cats.items(), key=lambda kv: -kv[1])[:8]]
+
+    # best bonus deals this month
+    deals: dict[int, dict[str, Any]] = {}
+    for r in order_rows:
+        if r["date"] < month_start.isoformat() or not r.get("bonus"):
+            continue
+        saved = max(0.0, (r["before"] or r["price"] or 0) - (r["paid"] or 0)) * float(r["quantity"] or 0)
+        if saved <= 0:
+            continue
+        e = deals.setdefault(r["product_id"], {"product_id": r["product_id"], "title": r.get("title") or "",
+                                               "bonus": r["bonus"], "saved": 0.0})
+        e["saved"] += saved
+    best = sorted(deals.values(), key=lambda e: -e["saved"])[:5]
+    for e in best:
+        e["saved"] = round(e["saved"], 2)
+
+    # price movers: normal (non-bonus) price now vs at least 4 weeks earlier; weekly checks, else paid list prices
+    series: dict[int, list[tuple[str, float]]] = {}
+    for r in weekly:
+        if r["price"] is not None and not r.get("bonus"):
+            series.setdefault(r["product_id"], []).append((r["date"], r["price"]))
+    source = "weekprijzen"
+    usable = sum(1 for v in series.values() if len(v) >= 2 and (date.fromisoformat(v[-1][0]) - date.fromisoformat(v[0][0])).days >= 28)
+    if usable < 5:
+        source = "aankopen"
+        series = {}
+        for r in sorted(order_rows, key=lambda r: r["date"]):
+            listp = r["before"] if r.get("bonus") else r["price"]
+            if listp and r["date"] >= (t - timedelta(days=180)).isoformat():
+                series.setdefault(r["product_id"], []).append((r["date"], listp))
+    movers = []
+    for pid, pts in series.items():
+        last_d, last_p = pts[-1]
+        ref = [pt for pt in pts if (date.fromisoformat(last_d) - date.fromisoformat(pt[0])).days >= 28]
+        if not ref:
+            continue
+        ref_d, ref_p = ref[0]
+        if ref_p and abs(last_p - ref_p) >= 0.05:
+            title, img = titles.get(pid, ("", None))
+            movers.append({"product_id": pid, "title": title, "image_url": img, "from": ref_p, "to": last_p,
+                           "pct": round((last_p - ref_p) / ref_p * 100, 1), "since": ref_d})
+    up = sorted([m for m in movers if m["pct"] > 0], key=lambda m: -m["pct"])[:6]
+    down = sorted([m for m in movers if m["pct"] < 0], key=lambda m: m["pct"])[:6]
+    return {"month": cur, "prev_month": prev, "weeks": week_list, "top": top, "categories": categories,
+            "best_deals": best, "movers": {"source": source, "up": up, "down": down}}
