@@ -251,3 +251,9 @@ get_insights:
         number:
           min: 4
           max: 52
+
+get_products:
+  name: Get products overview
+  description: >-
+    Every product ever bought (delivery and store) - last bought, times, average paid per item (what was really paid),
+    current price and bonus from the weekly check, and the difference between the current normal price and the average paid.

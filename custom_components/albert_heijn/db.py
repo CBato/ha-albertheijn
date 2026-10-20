@@ -550,3 +550,52 @@ def insights(path: str, today: str, weeks: int = 12) -> dict[str, Any]:
     down = sorted([m for m in movers if m["pct"] < 0], key=lambda m: m["pct"])[:6]
     return {"month": cur, "prev_month": prev, "weeks": week_list, "top": top, "categories": categories,
             "best_deals": best, "movers": {"source": source, "up": up, "down": down}}
+
+
+def products_overview(path: str) -> list[dict[str, Any]]:
+    """Every product ever bought: last bought, times, average paid per item (what was really paid), last paid,
+    current price and bonus (latest weekly check), and the difference current vs average paid."""
+    with closing(_connect(path)) as con:
+        buys = [dict(r) for r in con.execute(
+            """SELECT i.product_id, o.date, i.quantity, COALESCE(i.effective, i.price) AS paid
+               FROM order_items i JOIN orders o ON o.order_id = i.order_id WHERE o.status = 'delivered'
+               UNION ALL
+               SELECT m.product_id, r.date, ri.quantity,
+                      CASE WHEN ri.quantity > 0 THEN ri.amount / ri.quantity END AS paid
+               FROM receipt_items ri JOIN receipts r ON r.receipt_id = ri.receipt_id
+               JOIN pos_map m ON m.pos_id = ri.pos_id AND m.product_id > 0""")]
+        products = {r["product_id"]: dict(r) for r in con.execute(
+            "SELECT product_id, title, brand, unit_size, category, image_url, in_catalog FROM products")}
+        latest = {r["product_id"]: dict(r) for r in con.execute(
+            "SELECT product_id, price, price_before_bonus, bonus, effective, MAX(date) AS d FROM prices GROUP BY product_id")}
+    agg: dict[int, dict[str, Any]] = {}
+    for b in sorted(buys, key=lambda b: b["date"]):
+        a = agg.setdefault(b["product_id"], {"days": set(), "qty": 0.0, "paid_sum": 0.0, "paid_qty": 0.0, "last": None, "last_paid": None})
+        q = float(b["quantity"] or 0)
+        a["days"].add(b["date"])
+        a["qty"] += q
+        if b["paid"] is not None and q > 0:
+            a["paid_sum"] += b["paid"] * q
+            a["paid_qty"] += q
+            a["last_paid"] = round(b["paid"], 3)
+        a["last"] = b["date"]
+    out = []
+    for pid, a in agg.items():
+        prod = products.get(pid, {})
+        lp = latest.get(pid) or {}
+        avg = round(a["paid_sum"] / a["paid_qty"], 3) if a["paid_qty"] else None
+        normal = lp.get("price_before_bonus") or lp.get("price")
+        cat = prod.get("category") or ""
+        out.append({
+            "product_id": pid, "title": prod.get("title") or f"Product {pid}", "brand": prod.get("brand"),
+            "unit_size": prod.get("unit_size"), "image_url": prod.get("image_url"),
+            "category": cat.split("/")[0].strip() if cat else "Overig", "subcategory": cat.split("/", 1)[1].strip() if "/" in cat else None,
+            "times": len(a["days"]), "quantity": round(a["qty"], 1), "last_bought": a["last"],
+            "avg_paid": avg, "last_paid": a["last_paid"],
+            "price": lp.get("price"), "normal_price": normal, "bonus": lp.get("bonus"), "effective": lp.get("effective"),
+            "price_date": lp.get("d"),
+            # current normal price vs what you paid on average (positive = more expensive now)
+            "diff_pct": round((normal - avg) / avg * 100, 1) if normal and avg else None,
+        })
+    out.sort(key=lambda r: r["last_bought"] or "", reverse=True)
+    return out
