@@ -57,3 +57,13 @@ _module("aiohttp", ClientSession=object)
 _pkg = _module("albert_heijn")
 _pkg.__path__ = [os.path.join(pkg_dir, "albert_heijn")]
 sys.path.insert(0, pkg_dir)
+
+
+class ConfigEntries:
+    """hass.config_entries with only async_entries (e.g. to find the Picnic integration)."""
+
+    def __init__(self, entries=None) -> None:
+        self.entries = entries or []
+
+    def async_entries(self, domain: str):
+        return [e for e in self.entries if e.domain == domain]

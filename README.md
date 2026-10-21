@@ -39,6 +39,7 @@ analysis services were added in this fork.
 | Suggestions | Due products and good bonus deals put on the AH shopping list automatically, with the reason why |
 | Analysis | Spending per month and week, biggest items, categories, bonus savings, price movers, a product overview |
 | Barcode | Barcode (EAN) to AH product, for scanning what has run out |
+| Other stores | The same products at Picnic, matched on barcode (EAN), and the shopping list compared |
 | Assist | "Zet melk op de lijst" (asks which one when in doubt), order status and changing the order by voice |
 
 The AH shopping list itself (add, tick off, the basket in the AH app) is not part of this integration. Use
@@ -67,6 +68,15 @@ config entry and entities are kept.
 
 The proxy runs on a random port of your Home Assistant host, and the browser has to be able to reach it. On your
 home network it works with the local IP address.
+
+### Other stores: Picnic (optional)
+
+Set up the official **Picnic** integration of Home Assistant. This integration then reuses its login: every week it
+looks up the products you buy at Picnic by barcode (EAN). There is nothing to configure here, and without the Picnic
+integration this step is skipped.
+
+Matching is on the barcode, so it covers branded products (Coca-Cola, Calvé). Store brands (AH, Picnic's own)
+have different barcodes and are not compared. `compare_list` and the "stores" field of `get_products` show the result.
 
 ### Assist sentences (optional)
 
@@ -98,6 +108,8 @@ Orders (from the original integration): "wat zit er in mijn bestelling", "wannee
 | AH's "Eerder gekocht" list | Once a week | Whole list (it changes) |
 | Prices of everything you buy | Once a week (and on Monday before `fill_list`) | Whole list (that is the measurement) |
 | Bonus this week and next week | Once a day (the first sync of the day) | Per week |
+| EAN (barcode) of the products you buy | Every sync, for products without one | Each product at most once a week while AH doesn't give one |
+| Prices at Picnic (with the Picnic integration) | Weekly per product | Only products with an EAN, each once a week |
 | Missing product details (title, category, image) | Every sync, for products that lack them | Each product at most once a week; products AH no longer sells online show the name from the till receipt |
 
 There is one sync at a time. Each step that fails is skipped and reported in `last_error` on the "Vaak besteld"
@@ -207,6 +219,7 @@ All services are in the `albert_heijn` domain. Services marked with *response* r
 | `fill_list` *response* | `dry_run`, `min_count` (3), `min_share` (0.3), `max_items` (25) | Put the suggestions on the AH shopping list; `dry_run` only returns them |
 | `cleanup_suggestions` *response* | `days` (14), `snooze_days` (7), `dry_run` | Remove suggestions that were left untouched (see above) |
 | `snooze_product` *response* | `product_id`, `days` (7; -1 never, 0 again) | Don't suggest a product for a while |
+| `compare_list` *response* | | The products on the shopping list with the AH price now and the Picnic price; totals over the products both sell |
 | `get_bonus` *response* | `week` (`current` / `next`) | Bonus on what you buy, with the price per item, your average and the saving |
 
 ### Analysis
@@ -274,7 +287,8 @@ New columns are added automatically on start. A JSON history from fork 0.6/0.7 i
 |---|---|
 | `orders` | Order id, delivery date, status (`open` snapshot / `delivered`) |
 | `order_items` | Per order and product: quantity, price, price before bonus, bonus, unit price, `effective` (really paid) |
-| `products` | Title, brand, size, category, image, `in_catalog` (in "Eerder gekocht") |
+| `products` | Title, brand, size, category, image, `in_catalog` (in "Eerder gekocht"), `gtin` (EAN), lookup timestamps |
+| `store_prices` | Weekly price at another store per product (`picnic`): article, title, price, price without offer; no article = not sold there |
 | `prices` | Weekly price check: price, price before bonus, bonus, unit price, `effective` (per item at the offer) |
 | `receipts`, `receipt_items`, `pos_map` | Till receipts, their lines, till product number to webshop product (-1 = not online) |
 | `bonus_weeks`, `bonus_offers` | Bonus weeks and their offers (previously bought + personal) |
@@ -292,6 +306,7 @@ custom_components/albert_heijn/
   config_flow.py   login and reauth
   coordinator.py   upcoming orders every 5 minutes; entry point for history, fill and cleanup
   history.py       sync of history, receipts, catalog, prices and bonus; rhythm (compute_frequent); fill and cleanup
+  compare.py       other stores (Picnic through the HA Picnic integration's login)
   suggest.py       pure logic: offers, effective price, bonus check, suggestions (no I/O)
   db.py            SQLite schema and queries (blocking, always run in the executor)
   sensor.py        sensors
@@ -328,6 +343,8 @@ stores tokens in `.tokens.json` (git-ignored). `python scripts/live_api.py` then
 | Eerder gekocht | GraphQL `productSearch(previouslyBought: true)` |
 | Till receipts | GraphQL `posReceiptsPage`, `posReceiptDetails`, `productConvertId` |
 | Bonus | `/mobile-services/bonuspage/v3/metadata`, `…/v2/section/previously-bought`, `…/v1/personal` |
+| EAN of a product | `GET /mobile-services/product/detail/v4/fir/{id}` (every field named gtin/ean is taken) |
+| Picnic | `python-picnic-api2` `get_article_by_gtin` (the library of the HA Picnic integration) |
 
 GraphQL introspection is disabled at AH. `graphql_query` is meant for trying things out.
 

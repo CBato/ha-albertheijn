@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 import time
 
-from _harness import tmp, OLD_STORE  # sets up the Home Assistant stubs
+from _harness import tmp, OLD_STORE, ConfigEntries  # sets up the Home Assistant stubs
 
 import importlib
 history = importlib.import_module("albert_heijn.history")
@@ -15,6 +15,8 @@ from albert_heijn.api import OrderItem, Fulfillment, DeliverySlot, AlbertHeijnAp
 
 
 class Hass:
+    config_entries = ConfigEntries()  # no Picnic integration
+
     class config:
         @staticmethod
         def path(name): return os.path.join(tmp, name)
@@ -36,6 +38,9 @@ for n, d in enumerate(weeks):
 
 
 class FakeApi:
+    async def get_product_gtins(self, product_id):
+        return []
+
     price_calls = 0
     closed_ok = True
 

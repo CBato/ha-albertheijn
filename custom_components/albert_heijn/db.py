@@ -48,7 +48,20 @@ CREATE TABLE IF NOT EXISTS products (
     image_url TEXT,
     in_catalog INTEGER NOT NULL DEFAULT 0,  -- in AH's "Eerder gekocht"
     updated TEXT,
-    details_tried TEXT              -- last time missing details were looked up at AH (at most weekly)
+    details_tried TEXT,             -- last time missing details were looked up at AH (at most weekly)
+    gtin TEXT,                      -- EAN/GTIN barcode(s), comma separated
+    gtin_tried TEXT                 -- last time the EAN was looked up at AH (at most weekly while unknown)
+);
+CREATE TABLE IF NOT EXISTS store_prices (
+    store TEXT NOT NULL,            -- 'picnic'
+    product_id INTEGER NOT NULL,    -- the AH product it was matched to (on EAN)
+    date TEXT NOT NULL,             -- day of the check
+    article_id TEXT,                -- the product at that store; NULL = not sold there
+    title TEXT,
+    price REAL,                     -- current price at that store (with its own offer)
+    original_price REAL,            -- price without the offer, if it has one
+    unit TEXT,
+    PRIMARY KEY (store, product_id, date)
 );
 CREATE TABLE IF NOT EXISTS prices (
     product_id INTEGER NOT NULL,
@@ -145,8 +158,9 @@ def init(path: str) -> None:
         if "effective" not in cols:
             con.execute("ALTER TABLE prices ADD COLUMN effective REAL")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(products)")}
-        if "details_tried" not in cols:
-            con.execute("ALTER TABLE products ADD COLUMN details_tried TEXT")
+        for col in ("details_tried", "gtin", "gtin_tried"):
+            if col not in cols:
+                con.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(suggestions)")}
         if "done_at" not in cols:
             con.execute("ALTER TABLE suggestions ADD COLUMN done_at TEXT")
@@ -626,6 +640,7 @@ def products_overview(path: str) -> list[dict[str, Any]]:
         till_names = _till_names(con)
         latest = {r["product_id"]: dict(r) for r in con.execute(
             "SELECT product_id, price, price_before_bonus, bonus, effective, MAX(date) AS d FROM prices GROUP BY product_id")}
+        other = _latest_store_prices(con)
     agg: dict[int, dict[str, Any]] = {}
     for b in sorted(buys, key=lambda b: b["date"]):
         a = agg.setdefault(b["product_id"], {"days": set(), "qty": 0.0, "paid_sum": 0.0, "paid_qty": 0.0, "last": None, "last_paid": None})
@@ -654,6 +669,7 @@ def products_overview(path: str) -> list[dict[str, Any]]:
             "price_date": lp.get("d"),
             # current normal price vs what you paid on average (positive = more expensive now)
             "diff_pct": round((normal - avg) / avg * 100, 1) if normal and avg else None,
+            "stores": other.get(pid) or {},
         })
     out.sort(key=lambda r: r["last_bought"] or "", reverse=True)
     return out
@@ -774,3 +790,90 @@ def last_purchase_dates(path: str, product_ids: list[int]) -> dict[int, str]:
         ):
             out[r["product_id"]] = r["d"]
     return out
+
+
+def _latest_store_prices(con: sqlite3.Connection) -> dict[int, dict[str, dict[str, Any]]]:
+    """Latest check per product and store, only where the store sells it: {product_id: {store: {...}}}."""
+    out: dict[int, dict[str, dict[str, Any]]] = {}
+    for r in con.execute(
+        """SELECT s.store, s.product_id, s.date, s.title, s.price, s.original_price, s.unit FROM store_prices s
+           JOIN (SELECT store, product_id, MAX(date) AS d FROM store_prices GROUP BY store, product_id) l
+             ON l.store = s.store AND l.product_id = s.product_id AND l.d = s.date
+           WHERE s.article_id IS NOT NULL"""
+    ):
+        out.setdefault(r["product_id"], {})[r["store"]] = {
+            "title": r["title"], "price": r["price"], "original_price": r["original_price"], "unit": r["unit"], "date": r["date"]}
+    return out
+
+
+def _bought_ids_sql() -> str:
+    return """SELECT product_id AS id FROM order_items UNION SELECT product_id FROM pos_map WHERE product_id > 0"""
+
+
+def missing_gtins(path: str, tried_before: str, limit: int) -> list[int]:
+    """Bought products without a known EAN that were not looked up since tried_before."""
+    with closing(_connect(path)) as con:
+        return [r["id"] for r in con.execute(
+            f"""SELECT ids.id FROM ({_bought_ids_sql()}) ids LEFT JOIN products p ON p.product_id = ids.id
+                WHERE (p.gtin IS NULL OR p.gtin = '') AND (p.gtin_tried IS NULL OR p.gtin_tried < ?) LIMIT ?""",
+            (tried_before, limit))]
+
+
+def save_gtins(path: str, product_id: int, gtins: list[str], now: str) -> None:
+    with closing(_connect(path)) as con, con:
+        con.execute("INSERT OR IGNORE INTO products(product_id, in_catalog, updated) VALUES(?, 0, ?)", (product_id, now))
+        con.execute("UPDATE products SET gtin = COALESCE(NULLIF(?, ''), gtin), gtin_tried = ? WHERE product_id = ?",
+                    (",".join(gtins), now, product_id))
+
+
+def store_due(path: str, store: str, checked_before: str, limit: int) -> list[tuple[int, str]]:
+    """Bought products with an EAN that were not checked at a store since checked_before: [(product_id, ean)]."""
+    with closing(_connect(path)) as con:
+        return [(r["product_id"], r["gtin"].split(",")[0]) for r in con.execute(
+            f"""SELECT p.product_id, p.gtin FROM products p JOIN ({_bought_ids_sql()}) ids ON ids.id = p.product_id
+                WHERE p.gtin IS NOT NULL AND p.gtin != ''
+                  AND NOT EXISTS (SELECT 1 FROM store_prices s WHERE s.store = ? AND s.product_id = p.product_id AND s.date >= ?)
+                LIMIT ?""", (store, checked_before, limit))]
+
+
+def save_store_price(path: str, store: str, product_id: int, day: str, found: dict[str, Any] | None) -> None:
+    """One check at a store; found None = not sold there (remembered, so it is not looked up again this week)."""
+    f = found or {}
+    with closing(_connect(path)) as con, con:
+        con.execute(
+            """INSERT OR REPLACE INTO store_prices(store, product_id, date, article_id, title, price, original_price, unit)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+            (store, product_id, day, f.get("article_id"), f.get("title"), f.get("price"), f.get("original_price"), f.get("unit")))
+
+
+def store_counts(path: str) -> dict[str, int]:
+    with closing(_connect(path)) as con:
+        out = {"gtin_known": con.execute("SELECT COUNT(*) FROM products WHERE gtin IS NOT NULL AND gtin != ''").fetchone()[0]}
+        for r in con.execute("SELECT store, COUNT(DISTINCT product_id) AS n FROM store_prices WHERE article_id IS NOT NULL GROUP BY store"):
+            out[f"{r['store']}_matched"] = r["n"]
+        return out
+
+
+def ah_prices_now(path: str, product_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """Latest weekly AH price per product: price now (the offer price per item when in the bonus) and title."""
+    out: dict[int, dict[str, Any]] = {}
+    if not product_ids:
+        return out
+    marks = ",".join("?" * len(product_ids))
+    with closing(_connect(path)) as con:
+        for r in con.execute(
+            f"""SELECT x.product_id, x.price, x.effective, x.bonus, p.title FROM prices x
+                JOIN (SELECT product_id, MAX(date) AS d FROM prices WHERE product_id IN ({marks}) GROUP BY product_id) l
+                  ON l.product_id = x.product_id AND l.d = x.date
+                LEFT JOIN products p ON p.product_id = x.product_id""", product_ids):
+            out[r["product_id"]] = {"price": r["effective"] if r["effective"] is not None else r["price"],
+                                    "bonus": r["bonus"], "title": r["title"]}
+        return out
+
+
+def store_prices_for(path: str, product_ids: list[int]) -> dict[int, dict[str, dict[str, Any]]]:
+    if not product_ids:
+        return {}
+    with closing(_connect(path)) as con:
+        allp = _latest_store_prices(con)
+    return {pid: allp[pid] for pid in product_ids if pid in allp}

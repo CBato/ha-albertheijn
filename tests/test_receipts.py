@@ -4,7 +4,7 @@ from datetime import date, timedelta
 import asyncio
 import os
 
-from _harness import tmp  # sets up the Home Assistant stubs
+from _harness import tmp, ConfigEntries  # sets up the Home Assistant stubs
 
 import importlib
 history = importlib.import_module("albert_heijn.history")
@@ -14,6 +14,8 @@ today = date.today()
 
 
 class Hass:
+    config_entries = ConfigEntries()  # no Picnic integration
+
     class config:
         @staticmethod
         def path(name): return os.path.join(tmp, name)
@@ -39,6 +41,9 @@ LINES = {
 
 
 class FakeApi:
+    async def get_product_gtins(self, product_id):
+        return []
+
     convert_calls = 0
 
     async def get_closed_fulfillments(self):

@@ -34,6 +34,7 @@ SERVICE_GET_PRODUCTS = "get_products"
 SERVICE_GET_BONUS = "get_bonus"
 SERVICE_SNOOZE_PRODUCT = "snooze_product"
 SERVICE_CLEANUP_SUGGESTIONS = "cleanup_suggestions"
+SERVICE_COMPARE_LIST = "compare_list"
 
 ATTR_QUERY = "query"
 ATTR_PRODUCT_ID = "product_id"
@@ -256,6 +257,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Failed to fill the list: {err}") from err
 
+    async def handle_compare_list(call: ServiceCall) -> ServiceResponse:
+        """The AH shopping list with the price at AH and at other stores (matched on EAN)."""
+        try:
+            return await _get_history(hass).async_compare_list()
+        except AlbertHeijnApiError as err:
+            raise HomeAssistantError(f"Compare failed: {err}") from err
+
     async def handle_cleanup_suggestions(call: ServiceCall) -> ServiceResponse:
         """Remove automatically added suggestions that were left on the list for `days` days."""
         coordinator = _get_coordinator(hass)
@@ -370,6 +378,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_COMPARE_LIST,
+        handle_compare_list,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_CLEANUP_SUGGESTIONS,
         handle_cleanup_suggestions,
         schema=CLEANUP_SUGGESTIONS_SCHEMA,
@@ -443,5 +458,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_GET_BONUS,
         SERVICE_SNOOZE_PRODUCT,
         SERVICE_CLEANUP_SUGGESTIONS,
+        SERVICE_COMPARE_LIST,
     ):
         hass.services.async_remove(DOMAIN, service)

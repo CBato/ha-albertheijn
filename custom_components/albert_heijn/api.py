@@ -637,6 +637,32 @@ class AlbertHeijnApi:
             if isinstance(p, dict) and p.get("webshopId")
         ]
 
+    async def get_product_gtins(self, product_id: int) -> list[str]:
+        """EAN/GTIN codes of a product, from the product details. AH doesn't document where they are, so every field
+        called gtin(s), ean(s) or barcode(s) is taken. Empty when the product doesn't exist (any more)."""
+        try:
+            data = await self._request("GET", f"/mobile-services/product/detail/v4/fir/{int(product_id)}")
+        except AlbertHeijnApiError as err:
+            if err.status == 404:
+                return []
+            raise
+        found: list[str] = []
+
+        def walk(node: Any, key: str = "") -> None:
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    walk(v, k)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v, key)
+            elif node is not None and key.lower() in ("gtin", "gtins", "ean", "eans", "barcode", "barcodes"):
+                code = "".join(ch for ch in str(node) if ch.isdigit())
+                if 8 <= len(code) <= 14 and code not in found:
+                    found.append(code)
+
+        walk(data)
+        return found
+
     async def lookup_gtin(self, code: str) -> Product | None:
         """Find the AH product for a barcode (EAN-8/13, UPC-A, GTIN-14). None if AH doesn't sell it."""
         digits = "".join(ch for ch in str(code) if ch.isdigit())

@@ -5,7 +5,7 @@ import asyncio
 import os
 import sqlite3
 
-from _harness import tmp  # sets up the Home Assistant stubs
+from _harness import tmp, ConfigEntries  # sets up the Home Assistant stubs
 
 import importlib
 history = importlib.import_module("albert_heijn.history")
@@ -17,6 +17,8 @@ monday = suggest.week_start(today)
 
 
 class Hass:
+    config_entries = ConfigEntries()  # no Picnic integration
+
     class config:
         @staticmethod
         def path(name): return os.path.join(tmp, name)
@@ -37,6 +39,9 @@ for n, d in enumerate(weeks):
 
 
 class FakeApi:
+    async def get_product_gtins(self, product_id):
+        return []
+
     on_list = [{"product_id": 3, "title": "Koffie", "quantity": 1, "checked": False}, {"product_id": None, "title": "bananen"}]
     written = []
 

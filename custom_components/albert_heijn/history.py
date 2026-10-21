@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from . import db
+from . import compare, db
 from .api import AlbertHeijnApi, AlbertHeijnApiError, Fulfillment
 from .suggest import REGULAR_DAYS, compute_suggestions, effective_price, eur, parse_promo, week_start
 from .const import DOMAIN
@@ -35,6 +35,11 @@ PRICE_MAX_PRODUCTS = 2000
 PRICE_BATCH = 30
 DETAILS_EVERY_DAYS = 7  # a product without title/category/image is looked up at AH at most once a week
 DETAILS_MAX = 1000  # per sync
+GTIN_EVERY_DAYS = 7  # an EAN AH doesn't give is asked again at most once a week
+GTIN_MAX = 800  # per sync
+STORE_EVERY_DAYS = 7  # prices at other stores: weekly
+STORE_MAX = 800  # per sync
+STORE_PAUSE = 0.5  # seconds between requests to another store
 CATALOG_EVERY_DAYS = 7
 SUMMARY_PAGE = 25
 SUMMARY_MAX_PAGES = 40  # 1000 orders
@@ -186,6 +191,7 @@ class OrderHistory:
         self.bonus_periods: list[dict[str, Any]] = []
         self.bonus_next: dict[str, Any] = {}  # cache for the sensor
         self.details_missing: int | None = None  # products still without title or category after the last sync
+        self.store_counts: dict[str, int] = {}  # products with an EAN, and matched per other store
 
     async def _run(self, func, *args):
         return await self._hass.async_add_executor_job(func, self._path, *args)
@@ -240,6 +246,7 @@ class OrderHistory:
             "products": snap["products"],
             "price_points": snap["price_points"],
             "details_missing": self.details_missing,
+            **self.store_counts,
             "synced_at": self.meta.get("synced_at"),
             "prices_at": self.meta.get("prices_at"),
             "catalog_at": self.meta.get("catalog_at"),
@@ -513,6 +520,18 @@ class OrderHistory:
                 _LOGGER.debug("Product details not available: %s", err)
                 errors.append(f"Productgegevens: {err}")
 
+            # 7. EAN codes of the products you buy (to find them at other stores)
+            try:
+                await self._fetch_gtins(now)
+            except AlbertHeijnApiError as err:
+                _LOGGER.debug("EAN codes not available: %s", err)
+                errors.append(f"EAN: {err}")
+
+            # 8. The same products at Picnic, matched on EAN (only with the Picnic integration of Home Assistant)
+            if err_picnic := await self._fetch_picnic(today, now):
+                errors.append(f"Picnic: {err_picnic}")
+            self.store_counts = await self._run(db.store_counts)
+
             self.meta["synced_at"] = now
             await self._run(db.set_meta, self.meta)
             self.bonus_next = await self.async_bonus("next")
@@ -624,6 +643,61 @@ class OrderHistory:
             mapping = await self._api.convert_pos_ids(unmapped)
             await self._run(db.save_pos_map, mapping)
         return bool(new) or bool(unmapped)
+
+    async def _fetch_gtins(self, now: str) -> int:
+        """Look up the EAN of bought products that don't have one yet (each at most once every GTIN_EVERY_DAYS)."""
+        tried_before = (datetime.now(timezone.utc) - timedelta(days=GTIN_EVERY_DAYS)).isoformat()
+        found = 0
+        for pid in await self._run(db.missing_gtins, tried_before, GTIN_MAX):
+            codes = await self._api.get_product_gtins(pid)
+            await self._run(db.save_gtins, pid, codes, now)
+            found += bool(codes)
+            await asyncio.sleep(REQUEST_PAUSE)
+        return found
+
+    async def _fetch_picnic(self, today: str, now: str) -> str | None:
+        """Weekly Picnic price of every bought product with an EAN. Returns an error text, or None."""
+        credentials = compare.picnic_credentials(self._hass)
+        if not credentials:
+            return None  # no Picnic integration: nothing to compare
+        due = await self._run(db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), STORE_MAX)
+        if not due:
+            return None
+        client = await self._hass.async_add_executor_job(compare.picnic_client, credentials)
+        if client is None:
+            return "python-picnic-api2 not installed"
+        for pid, gtin in due:
+            try:
+                found = await self._hass.async_add_executor_job(compare.picnic_lookup, client, gtin)
+            except Exception as err:  # noqa: BLE001 - the Picnic library raises its own and requests' errors
+                _LOGGER.debug("Picnic lookup %s failed: %s", gtin, err)
+                return str(err)[:200]
+            await self._run(db.save_store_price, compare.PICNIC, pid, today, found)
+            await asyncio.sleep(STORE_PAUSE)
+        return None
+
+    async def async_compare_list(self) -> dict[str, Any]:
+        """What is on the AH shopping list now, with the AH price and the price at other stores (matched on EAN).
+        Totals only over products that every compared store sells, so they compare like with like."""
+        items = [i for i in await self._api.get_shopping_list() if i.get("product_id") and not i.get("checked")]
+        ids = [int(i["product_id"]) for i in items]
+        ah = await self._run(db.ah_prices_now, ids)
+        other = await self._run(db.store_prices_for, ids)
+        rows, totals = [], {"ah": 0.0, compare.PICNIC: 0.0}
+        both = 0
+        for i in items:
+            pid, qty = int(i["product_id"]), int(i.get("quantity") or 1)
+            a, p = ah.get(pid) or {}, (other.get(pid) or {}).get(compare.PICNIC)
+            rows.append({"product_id": pid, "title": a.get("title") or i.get("title"), "quantity": qty,
+                         "ah": a.get("price"), "ah_bonus": a.get("bonus"), "picnic": p.get("price") if p else None,
+                         "picnic_title": p.get("title") if p else None, "picnic_offer": bool(p and p.get("original_price"))})
+            if a.get("price") is not None and p and p.get("price") is not None:
+                both += 1
+                totals["ah"] += a["price"] * qty
+                totals[compare.PICNIC] += p["price"] * qty
+        return {"items": rows, "compared": both, "on_list": len(items),
+                "totals": {k: round(v, 2) for k, v in totals.items()},
+                "picnic_connected": compare.picnic_credentials(self._hass) is not None}
 
     async def _fetch_details(self, now: str) -> bool:
         """Look up products that lack a title, category or image (each at most once every DETAILS_EVERY_DAYS)."""

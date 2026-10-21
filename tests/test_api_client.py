@@ -32,5 +32,9 @@ async def main():
         await A.AlbertHeijnApi(s, "t", "r").add_to_order([], order_id=1); assert False
     except A.AlbertHeijnApiError as e:
         assert e.status == 400
+    # EAN codes anywhere in the product details; 404 = no codes
+    body = {"productCard": {"title": "x", "tradeItem": {"gtin": "08710400000011"}}, "extra": [{"eans": ["8710400000028", "12"]}]}
+    assert await A.AlbertHeijnApi(Session([Resp(200, body)]), "t", "r").get_product_gtins(1) == ["08710400000011", "8710400000028"]
+    assert await A.AlbertHeijnApi(Session([Resp(404)]), "t", "r").get_product_gtins(1) == []
     print("API OK")
 asyncio.run(main())
