@@ -219,6 +219,7 @@ All services are in the `albert_heijn` domain. Services marked with *response* r
 | `fill_list` *response* | `dry_run`, `min_count` (3), `min_share` (0.3), `max_items` (25) | Put the suggestions on the AH shopping list; `dry_run` only returns them |
 | `cleanup_suggestions` *response* | `days` (14), `snooze_days` (7), `dry_run` | Remove suggestions that were left untouched (see above) |
 | `snooze_product` *response* | `product_id`, `days` (7; -1 never, 0 again) | Don't suggest a product for a while |
+| `set_list_quantity` | `product_id`, `quantity` (0 removes), `title` | Set how many of a product are on the AH shopping list |
 | `compare_list` *response* | | The products on the shopping list with the AH price now and the Picnic price; totals over the products both sell |
 | `get_bonus` *response* | `week` (`current` / `next`) | Bonus on what you buy, with the price per item, your average and the saving |
 

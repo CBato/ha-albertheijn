@@ -311,3 +311,28 @@ compare_list:
   description: >-
     The products on the AH shopping list with the AH price now and the price at Picnic (matched on EAN, needs the
     Picnic integration of Home Assistant). Totals only over products both stores sell.
+
+set_list_quantity:
+  name: Set quantity on the shopping list
+  description: Set how many of a product are on the AH shopping list (the basket in the AH app); 0 removes it.
+  fields:
+    product_id:
+      name: Product ID
+      required: true
+      selector:
+        number:
+          min: 1
+          mode: box
+    quantity:
+      name: Quantity
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 99
+          mode: box
+    title:
+      name: Title
+      description: Product name (shown on the list until AH fills it in).
+      selector:
+        text:

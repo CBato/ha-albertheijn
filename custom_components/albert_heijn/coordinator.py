@@ -183,6 +183,11 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
         self._update_tokens()
         return None
 
+    async def async_set_list_quantity(self, product_id: int, quantity: int, title: str = "") -> None:
+        """Set the quantity of a product on the AH shopping list (0 removes it)."""
+        await self.api.set_list_items([{"product_id": product_id, "title": title, "quantity": quantity}])
+        self._update_tokens()
+
     async def async_cleanup_suggestions(self, days: int = 14, dry_run: bool = False, snooze_days: int = 7) -> dict:
         """Remove suggestions that were left on the list (see history.async_cleanup_suggestions)."""
         if not self.history:

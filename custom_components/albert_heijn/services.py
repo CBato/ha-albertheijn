@@ -35,6 +35,7 @@ SERVICE_GET_BONUS = "get_bonus"
 SERVICE_SNOOZE_PRODUCT = "snooze_product"
 SERVICE_CLEANUP_SUGGESTIONS = "cleanup_suggestions"
 SERVICE_COMPARE_LIST = "compare_list"
+SERVICE_SET_LIST_QUANTITY = "set_list_quantity"
 
 ATTR_QUERY = "query"
 ATTR_PRODUCT_ID = "product_id"
@@ -132,6 +133,14 @@ SNOOZE_PRODUCT_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int),
         vol.Optional("days", default=7): vol.All(vol.Coerce(int), vol.Range(min=-1, max=365)),
+    }
+)
+
+SET_LIST_QUANTITY_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int),
+        vol.Required(ATTR_QUANTITY): _QUANTITY,
+        vol.Optional("title", default=""): cv.string,
     }
 )
 
@@ -257,6 +266,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Failed to fill the list: {err}") from err
 
+    async def handle_set_list_quantity(call: ServiceCall) -> None:
+        """Set the quantity of a product on the AH shopping list (0 removes it)."""
+        try:
+            await _get_coordinator(hass).async_set_list_quantity(call.data[ATTR_PRODUCT_ID], call.data[ATTR_QUANTITY], call.data["title"])
+        except AlbertHeijnApiError as err:
+            raise HomeAssistantError(f"Failed to set the quantity: {err}") from err
+
     async def handle_compare_list(call: ServiceCall) -> ServiceResponse:
         """The AH shopping list with the price at AH and at other stores (matched on EAN)."""
         try:
@@ -378,6 +394,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_SET_LIST_QUANTITY,
+        handle_set_list_quantity,
+        schema=SET_LIST_QUANTITY_SCHEMA,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_COMPARE_LIST,
         handle_compare_list,
         supports_response=SupportsResponse.ONLY,
@@ -459,5 +482,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_SNOOZE_PRODUCT,
         SERVICE_CLEANUP_SUGGESTIONS,
         SERVICE_COMPARE_LIST,
+        SERVICE_SET_LIST_QUANTITY,
     ):
         hass.services.async_remove(DOMAIN, service)
