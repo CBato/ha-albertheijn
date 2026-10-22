@@ -71,9 +71,13 @@ home network it works with the local IP address.
 
 ### Other stores: Picnic (optional)
 
-Set up the official **Picnic** integration of Home Assistant. This integration then reuses its login: every week it
-looks up the products you buy at Picnic by barcode (EAN). There is nothing to configure here, and without the Picnic
-integration this step is skipped.
+Set up the official **Picnic** integration of Home Assistant. This integration uses that integration's own
+connection (one session and login token; Picnic can hand out a new token with any answer and the Picnic integration
+stores it), and every week looks up the products you buy at Picnic. There is nothing to configure here; without the
+Picnic integration, or while it is not loaded, this step is skipped.
+
+Gentle on Picnic: 2 seconds between requests, at most 300 products per run, at most 2 searches per product. After an
+error it waits and goes on; after 3 errors in a row it stops and leaves Picnic alone for 24 hours.
 
 Each product you buy is matched in this order, and every match gets a kind and a score:
 

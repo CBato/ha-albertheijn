@@ -177,8 +177,22 @@ async def main():
     FakePicnic.get_article_by_gtin = lambda self, gtin: (_ for _ in ()).throw(ValueError("Expecting value"))
     err = await h._fetch_picnic("2026-12-30", now)
     assert err and "gestopt na" in err, err
+    # after a stopped round Picnic is left alone for a day
+    again = await h._fetch_picnic("2026-12-30", now)
+    assert again and "gepauzeerd" in again, again
+    h.meta.pop("picnic_paused_until")
     assert {21, 22, 23} <= {p["product_id"] for p in await h._run(db.store_due, "picnic", "2026-10-22", 100)}  # still to do
     FakePicnic.get_article_by_gtin = orig
+
+    # the client of the loaded Picnic integration is used (one session and token); not loaded: leave Picnic alone
+    shared = FakePicnic()
+    entry = Hass.config_entries.entries[0]
+    entry.runtime_data = NS(picnic_api_client=shared)
+    assert (await h._picnic())[0] is shared
+    entry.state = NS(value="setup_retry")
+    client, why = await h._picnic()
+    assert client is None and "niet geladen" in why
+    del entry.state, entry.runtime_data
 
     # without the Picnic integration: skipped, no error
     Hass.config_entries = ConfigEntries()

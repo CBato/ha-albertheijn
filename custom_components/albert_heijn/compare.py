@@ -1,7 +1,8 @@
 """Prices at other supermarkets, matched on EAN (barcode).
 
-Picnic: through the official Picnic integration of Home Assistant. Its login (access token + country) is reused,
-so there is nothing to configure here; without that integration the comparison is simply skipped.
+Picnic: through the official Picnic integration of Home Assistant. Its own client (connection) is used, so there is
+one login token: Picnic can hand out a new token with any answer, and the integration stores it. Nothing to configure
+here; without that integration (or while it is not loaded) the comparison is simply skipped.
 The Picnic client (python-picnic-api2, installed by Home Assistant for its Picnic integration) is blocking:
 call these functions in the executor.
 """
@@ -15,12 +16,28 @@ PICNIC = "picnic"
 PICNIC_IMAGE = "https://storefront-prod.nl.picnicinternational.com/static/images/{}/small.png"
 
 
+def picnic_entry(hass):
+    """The config entry of the Picnic integration, if it is set up (call in the event loop)."""
+    return next((e for e in hass.config_entries.async_entries("picnic") if e.data.get("access_token")), None)
+
+
 def picnic_credentials(hass) -> dict[str, str] | None:
     """Access token and country of the Picnic integration, if it is set up (call in the event loop)."""
-    for entry in hass.config_entries.async_entries("picnic"):
-        if entry.data.get("access_token"):
-            return {"auth_token": entry.data["access_token"], "country_code": entry.data.get("country_code") or "NL"}
-    return None
+    entry = picnic_entry(hass)
+    if not entry:
+        return None
+    return {"auth_token": entry.data["access_token"], "country_code": entry.data.get("country_code") or "NL"}
+
+
+def shared_client(entry):
+    """The client of the loaded Picnic integration (one session and token for both), or None."""
+    return getattr(getattr(entry, "runtime_data", None), "picnic_api_client", None)
+
+
+def picnic_loaded(entry) -> bool:
+    """False while the Picnic integration is not loaded (e.g. setup failed): then leave Picnic alone."""
+    state = getattr(entry, "state", None)
+    return state is None or getattr(state, "value", state) == "loaded"
 
 
 def picnic_client(credentials: dict[str, str]):

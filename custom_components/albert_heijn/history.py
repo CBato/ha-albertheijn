@@ -55,7 +55,9 @@ GTIN_MAX = 150  # per sync
 STORE_EVERY_DAYS = 7  # prices at other stores: weekly
 STORE_RETRY_DAYS = 28  # a product not found at a store is looked for again after 4 weeks
 STORE_MAX = 150  # per sync
-STORE_PAUSE = 1.0  # seconds between requests to another store
+STORE_RUN_MAX = 300  # never more products per run at another store, also when asked for more (be gentle)
+STORE_PAUSE = 2.0  # seconds between requests to another store
+STORE_PAUSE_HOURS = 24  # after a round that stopped on errors: leave the store alone this long
 STORE_TIMEOUT = 20  # seconds; a slow or hanging store stops this round instead of holding the sync
 STORE_BACKOFF = 30  # seconds to wait after an error (x the number of errors in a row), then go on
 STORE_MAX_ERRORS = 3  # errors in a row before stopping this round (the rest follows next time)
@@ -704,11 +706,15 @@ class OrderHistory:
         return found
 
     async def _picnic(self):
-        """A Picnic client with the login of the Picnic integration, or (None, reason)."""
-        credentials = compare.picnic_credentials(self._hass)
-        if not credentials:
+        """The client of the Picnic integration (shared session and token), or (None, reason)."""
+        entry = compare.picnic_entry(self._hass)
+        if not entry:
             return None, None  # no Picnic integration: nothing to compare
-        client = await self._hass.async_add_executor_job(compare.picnic_client, credentials)
+        if not compare.picnic_loaded(entry):
+            return None, "Picnic-integratie niet geladen; overgeslagen"
+        if client := compare.shared_client(entry):
+            return client, None
+        client = await self._hass.async_add_executor_job(compare.picnic_client, compare.picnic_credentials(self._hass))
         return (client, None) if client else (None, "python-picnic-api2 not installed")
 
     async def _picnic_check(self, client, product: dict[str, Any], matches: dict[int, dict[str, Any]], today: str) -> None:
@@ -739,7 +745,7 @@ class OrderHistory:
         if not found and product.get("title"):
             # from precise to broad; stop at the first search with a good match, else the best over all searches
             candidates: dict[str, dict[str, Any]] = {}
-            for query in search_queries(product["title"], product.get("brand")):
+            for query in search_queries(product["title"], product.get("brand"))[:2]:
                 await asyncio.sleep(STORE_PAUSE)
                 for c in await job(compare.picnic_search, client, query):
                     candidates.setdefault(c["article_id"], c)
@@ -760,7 +766,11 @@ class OrderHistory:
         """Weekly Picnic prices. Matched products: only the price of their article (1 request). New products: barcode,
         else name and size. Not found: looked for again after STORE_RETRY_DAYS (or now with retry_not_found).
         Returns an error text, or None."""
-        due = await self._run(db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), self._max or STORE_MAX, self._retry,
+        paused = self.meta.get("picnic_paused_until") or ""
+        if paused > _now():
+            return f"Picnic gepauzeerd tot {paused[:16].replace('T', ' ')} (na fouten)"
+        due = await self._run(db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(),
+                             min(self._max or STORE_MAX, STORE_RUN_MAX), self._retry,
                              (date.today() - timedelta(days=STORE_RETRY_DAYS - 1)).isoformat())
         if not due:
             return None
@@ -777,7 +787,11 @@ class OrderHistory:
                 errors += 1
                 _LOGGER.warning("Picnic check of %s failed (%d in a row): %s", product["product_id"], errors, err)
                 if errors >= STORE_MAX_ERRORS:
-                    return f"{str(err)[:150]} - gestopt na {done} producten; de rest volgt bij de volgende ronde"
+                    until = (datetime.now(timezone.utc) + timedelta(hours=STORE_PAUSE_HOURS)).isoformat()
+                    self.meta["picnic_paused_until"] = until
+                    await self._run(db.set_meta, {"picnic_paused_until": until})
+                    return (f"{str(err)[:150]} - gestopt na {done} producten; Picnic {STORE_PAUSE_HOURS} uur met rust gelaten, "
+                            "daarna gaat het vanzelf verder")
                 await asyncio.sleep(STORE_BACKOFF * errors)
                 continue
             errors, done = 0, done + 1
