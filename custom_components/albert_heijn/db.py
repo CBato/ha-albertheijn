@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS store_prices (
     original_price REAL,            -- price without the offer, if it has one
     unit TEXT,
     image_url TEXT,
+    guess TEXT,                     -- not found: the best candidate below the match score (JSON), to confirm by hand
     match TEXT,                     -- how it was matched: ean, confirmed, same (name + size), size (other size), similar
     score INTEGER,                  -- 100 = same barcode or confirmed; name matches 60-95
     PRIMARY KEY (store, product_id, date)
@@ -173,7 +174,7 @@ def init(path: str) -> None:
             if col not in cols:
                 con.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(store_prices)")}
-        for col, kind in (("match", "TEXT"), ("score", "INTEGER"), ("image_url", "TEXT")):
+        for col, kind in (("match", "TEXT"), ("score", "INTEGER"), ("image_url", "TEXT"), ("guess", "TEXT")):
             if col not in cols:
                 con.execute(f"ALTER TABLE store_prices ADD COLUMN {col} {kind}")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(suggestions)")}
@@ -879,16 +880,18 @@ def store_due(path: str, store: str, checked_before: str, limit: int, retry_not_
         ]
 
 
-def save_store_price(path: str, store: str, product_id: int, day: str, found: dict[str, Any] | None) -> None:
+def save_store_price(path: str, store: str, product_id: int, day: str, found: dict[str, Any] | None,
+                     guess: dict[str, Any] | None = None) -> None:
     """One check at a store; found None = not found there (remembered, so it is not looked up again this week).
     found: article_id, title, price, original_price, unit, match, score."""
     f = found or {}
     with closing(_connect(path)) as con, con:
         con.execute(
-            """INSERT OR REPLACE INTO store_prices(store, product_id, date, article_id, title, price, original_price, unit, image_url, match, score)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT OR REPLACE INTO store_prices(store, product_id, date, article_id, title, price, original_price, unit, image_url,
+                                                     match, score, guess)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (store, product_id, day, f.get("article_id"), f.get("title"), f.get("price"), f.get("original_price"), f.get("unit"),
-             f.get("image_url"), f.get("match"), f.get("score")))
+             f.get("image_url"), f.get("match"), f.get("score"), json.dumps(guess, ensure_ascii=False) if guess else None))
 
 
 def store_counts(path: str) -> dict[str, int]:
@@ -958,3 +961,47 @@ def product_for_store(path: str, product_id: int) -> dict[str, Any] | None:
         return None
     return {"product_id": r["product_id"], "gtins": [g for g in (r["gtin"] or "").split(",") if g][:3], "title": r["title"],
             "brand": r["brand"], "unit_size": r["unit_size"]}
+
+
+def add_confirmed_match(path: str, store: str, product_id: int, article_id: str, now: str) -> None:
+    """Remember a match as confirmed, without touching the price checks (see set_store_match for the UI)."""
+    with closing(_connect(path)) as con, con:
+        con.execute("DELETE FROM store_matches WHERE store = ? AND product_id = ? AND status = 'confirmed'", (store, product_id))
+        con.execute(
+            """INSERT INTO store_matches(store, product_id, article_id, status, updated) VALUES(?, ?, ?, 'confirmed', ?)
+               ON CONFLICT(store, product_id, article_id) DO UPDATE SET status = 'confirmed', updated = excluded.updated""",
+            (store, product_id, article_id, now))
+
+
+def confirm_high_scores(path: str, store: str, min_score: int, now: str) -> int:
+    """Name matches scoring min_score or more count as confirmed (latest check per product; never a rejected one)."""
+    with closing(_connect(path)) as con, con:
+        rows = [dict(r) for r in con.execute(
+            """SELECT s.product_id, s.article_id, s.date FROM store_prices s
+               JOIN (SELECT product_id, MAX(date) AS d FROM store_prices WHERE store = ? GROUP BY product_id) x
+                 ON x.product_id = s.product_id AND x.d = s.date
+               WHERE s.store = ? AND s.article_id IS NOT NULL AND s.match IN ('same', 'size', 'similar') AND s.score >= ?
+                 AND NOT EXISTS (SELECT 1 FROM store_matches m WHERE m.store = s.store AND m.product_id = s.product_id)""",
+            (store, store, min_score))]
+        for r in rows:
+            con.execute("INSERT OR IGNORE INTO store_matches(store, product_id, article_id, status, updated) VALUES(?, ?, ?, 'confirmed', ?)",
+                        (store, r["product_id"], r["article_id"], now))
+            con.execute("UPDATE store_prices SET match = 'confirmed', score = 100 WHERE store = ? AND product_id = ? AND date = ?",
+                        (store, r["product_id"], r["date"]))
+        return len(rows)
+
+
+def store_guesses(path: str, store: str, product_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """For products not found at a store: the best guess of the last check."""
+    if not product_ids:
+        return {}
+    marks = ",".join("?" * len(product_ids))
+    out: dict[int, dict[str, Any]] = {}
+    with closing(_connect(path)) as con:
+        for r in con.execute(
+            f"""SELECT s.product_id, s.guess FROM store_prices s
+                JOIN (SELECT product_id, MAX(date) AS d FROM store_prices WHERE store = ? AND product_id IN ({marks}) GROUP BY product_id) x
+                  ON x.product_id = s.product_id AND x.d = s.date
+                WHERE s.store = ? AND s.article_id IS NULL AND s.guess IS NOT NULL""", (store, *product_ids, store)):
+            out[r["product_id"]] = json.loads(r["guess"])
+    return out

@@ -13,6 +13,7 @@ history = importlib.import_module("albert_heijn.history")
 compare = importlib.import_module("albert_heijn.compare")
 db = importlib.import_module("albert_heijn.db")
 history.STORE_PAUSE = 0
+history.AUTO_CONFIRM_SCORE = 101  # first without auto-confirm; checked separately at the end
 
 # your products: 1 branded with EAN, 2 Calvé without EAN at Picnic (other size there), 3 store brand
 PRODUCTS = [(1, "Coca-Cola Regular", "Coca-Cola", "1,5 l"), (2, "Calvé Pindakaas", "Calvé", "450 g"), (3, "AH Halfvolle melk", "AH", "1 l")]
@@ -129,6 +130,17 @@ async def main():
     history.date = date
     assert FakePicnic.calls == n and FakePicnic.article_calls == a + 3, (FakePicnic.calls - n, FakePicnic.article_calls - a)
     assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["match"] == "size"  # kind and score kept
+
+    # name matches of 95+ count as confirmed: the Calvé (95, other size); the price history stays
+    assert await h._run(db.confirm_high_scores, "picnic", 95, now) == 1
+    calve = (await h._run(db.store_prices_for, [2]))[2]["picnic"]
+    assert calve["match"] == "confirmed" and calve["score"] == 100
+    assert (await h._run(db.store_matches, "picnic"))[2]["confirmed"] == "s2"
+    assert await h._run(db.confirm_high_scores, "picnic", 95, now) == 0
+
+    # not found: the best guess below the match score is kept, to confirm by hand
+    await h._run(db.save_store_price, "picnic", 9, today, None, {"article_id": "g1", "title": "Picnic kookroom", "price": 1.1, "score": 45})
+    assert (await h._run(db.store_guesses, "picnic", [9, 1]))[9]["article_id"] == "g1"
 
     # without the Picnic integration: skipped, no error
     Hass.config_entries = ConfigEntries()

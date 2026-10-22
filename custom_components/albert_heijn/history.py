@@ -20,6 +20,8 @@ from homeassistant.util import dt as dt_util
 from . import compare, db
 from .api import AlbertHeijnApi, AlbertHeijnApiError, Fulfillment
 from .suggest import (
+    AUTO_CONFIRM_SCORE,
+    GUESS_MIN_SCORE,
     REGULAR_DAYS,
     best_match,
     match_score,
@@ -221,6 +223,8 @@ class OrderHistory:
         if week := self.meta.get("suggest_week"):
             self.suggestions = await self._run(db.get_suggestions, week)
         self.bonus_next = await self.async_bonus("next")
+        if n := await self._run(db.confirm_high_scores, compare.PICNIC, AUTO_CONFIRM_SCORE, _now()):
+            _LOGGER.info("Albert Heijn: %d Picnic matches with score %d+ confirmed", n, AUTO_CONFIRM_SCORE)
 
     async def _import_old_store(self) -> None:
         """One-time import of the JSON history of fork 0.6/0.7 (.storage/albert_heijn.history.<entry>)."""
@@ -700,7 +704,7 @@ class OrderHistory:
             return await asyncio.wait_for(self._hass.async_add_executor_job(func, *args), STORE_TIMEOUT)
 
         m = matches.get(pid) or {"confirmed": None, "rejected": set()}
-        found = None
+        found, guess = None, None
         if m["confirmed"]:
             if found := await job(compare.picnic_article, client, m["confirmed"]):
                 found.update(match="confirmed", score=100)
@@ -727,7 +731,13 @@ class OrderHistory:
             if best := best_match(product, list(candidates.values()), m["rejected"]):
                 found = {k: best.get(k) for k in ("article_id", "title", "price", "unit", "image_url")}
                 found.update(match=best["kind"], score=best["score"])
-        await self._run(db.save_store_price, compare.PICNIC, pid, today, found)
+            elif best := best_match(product, list(candidates.values()), m["rejected"], GUESS_MIN_SCORE):
+                # not good enough to count, but worth a look: confirm it by hand
+                guess = {k: best.get(k) for k in ("article_id", "title", "price", "unit", "image_url", "score", "kind")}
+        if found and found.get("match") in ("same", "size", "similar") and found["score"] >= AUTO_CONFIRM_SCORE:
+            await self._run(db.add_confirmed_match, compare.PICNIC, pid, found["article_id"], _now())
+            found.update(match="confirmed", score=100)
+        await self._run(db.save_store_price, compare.PICNIC, pid, today, found, guess)
 
     async def _fetch_picnic(self, today: str, now: str) -> str | None:
         """Weekly Picnic prices. Matched products: only the price of their article (1 request). New products: barcode,
@@ -781,6 +791,7 @@ class OrderHistory:
         ids = [int(i["product_id"]) for i in items]
         ah = await self._run(db.ah_prices_now, ids)
         other = await self._run(db.store_prices_for, ids)
+        guesses = await self._run(db.store_guesses, compare.PICNIC, ids)
         rows = []
         sure = {"n": 0, "ah": 0.0, compare.PICNIC: 0.0}  # same barcode, or a match you confirmed
         likely = {"n": 0, "ah": 0.0, compare.PICNIC: 0.0}  # plus name matches (other sizes recalculated to yours)
@@ -805,6 +816,8 @@ class OrderHistory:
                         bucket["n"] += 1
                         bucket["ah"] += a["price"] * qty
                         bucket[compare.PICNIC] += row["picnic_equiv"] * qty
+            elif guesses.get(pid):
+                row["picnic_guess"] = guesses[pid]
             rows.append(row)
         rnd = lambda b: {k: (round(v, 2) if isinstance(v, float) else v) for k, v in b.items()}  # noqa: E731
         return {"items": rows, "on_list": len(items), "compared": sure["n"], "totals": rnd(sure), "likely": rnd(likely),

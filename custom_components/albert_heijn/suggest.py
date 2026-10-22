@@ -313,10 +313,13 @@ _WEAK = {"echte", "echt", "original", "originele", "origineel", "classic", "klas
 _QUALIFIERS = {"half", "mager", "extra", "super", "light", "licht", "dubbel", "volkoren", "wit", "witte", "bruin", "bruine",
                "zoet", "zuur", "zout", "ongezouten", "pittig", "mild", "jong", "oud", "belegen", "zero", "suikervrij", "vol"}
 # the same word written differently
-_SYNONYMS = {"biologisch": "bio", "biologische": "bio", "organic": "bio", "eko": "bio"}
+_SYNONYMS = {"biologisch": "bio", "biologische": "bio", "organic": "bio", "eko": "bio",
+             "hagel": "hagelslag", "chocoladehagel": "hagelslag", "chocoladehagelslag": "hagelslag"}
 # store brands: different at every store, so the brand doesn't have to match (the product does)
 _HOUSE = {"ah", "albert", "heijn", "picnic", "excellent", "terra", "basic", "huismerk", "g&g"}
 MATCH_MIN_SCORE = 60  # below this a name match is not shown
+AUTO_CONFIRM_SCORE = 95  # a name match this good counts as confirmed (you can still reject it)
+GUESS_MIN_SCORE = 30  # below the match score: kept as "best guess" to confirm by hand
 
 
 def parse_size(text: str | None) -> tuple[float, str] | None:
@@ -432,8 +435,9 @@ def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str,
     return {"score": max(0, min(95, round(score))), "kind": kind}  # 100 = same barcode or confirmed
 
 
-def best_match(product: dict[str, Any], candidates: list[dict[str, Any]], skip: set[str] | frozenset = frozenset()) -> dict[str, Any] | None:
-    """The best scoring candidate (not in skip) with score and kind, or None below MATCH_MIN_SCORE."""
+def best_match(product: dict[str, Any], candidates: list[dict[str, Any]], skip: set[str] | frozenset = frozenset(),
+               min_score: int = MATCH_MIN_SCORE) -> dict[str, Any] | None:
+    """The best scoring candidate (not in skip) with score and kind, or None below min_score."""
     best = None
     for c in candidates:
         if not c.get("article_id") or c["article_id"] in skip:
@@ -441,4 +445,4 @@ def best_match(product: dict[str, Any], candidates: list[dict[str, Any]], skip: 
         m = {**c, **match_score(product, c)}
         if best is None or m["score"] > best["score"]:
             best = m
-    return best if best and best["score"] >= MATCH_MIN_SCORE else None
+    return best if best and best["score"] >= min_score else None
