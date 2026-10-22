@@ -11,6 +11,8 @@ from __future__ import annotations
 from typing import Any
 
 PICNIC = "picnic"
+# Picnic's image CDN, as in python-picnic-api2 (helper.get_image): <base>/<image_id>/<size>.png
+PICNIC_IMAGE = "https://storefront-prod.nl.picnicinternational.com/static/images/{}/small.png"
 
 
 def picnic_credentials(hass) -> dict[str, str] | None:
@@ -34,12 +36,17 @@ def _euro(cents) -> float | None:
     return round(cents / 100, 2) if isinstance(cents, (int, float)) else None
 
 
+def _image(obj) -> str | None:
+    image_id = getattr(obj, "image_id", None)
+    return PICNIC_IMAGE.format(image_id) if image_id else None
+
+
 def picnic_search(client, query: str, limit: int = 8) -> list[dict[str, Any]]:
     """Picnic search results: article_id, title, price (euro), unit (blocking)."""
     result = client.search(query)
     return [
         {"article_id": i.id, "title": getattr(i, "name", None), "price": _euro(getattr(i, "display_price", None)),
-         "unit": getattr(i, "unit_quantity", None)}
+         "unit": getattr(i, "unit_quantity", None), "image_url": _image(i)}
         for i in (getattr(result, "items", None) or [])[:limit]
         if getattr(i, "id", None)
     ]
@@ -59,6 +66,7 @@ def _article(article) -> dict[str, Any] | None:
         "price": _euro(getattr(article, "price", None)),
         "original_price": _euro(getattr(article, "original_price", None)),
         "unit": getattr(article, "unit_quantity", None),
+        "image_url": _image(article),
     }
 
 

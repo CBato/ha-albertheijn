@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS store_prices (
     price REAL,                     -- current price at that store (with its own offer)
     original_price REAL,            -- price without the offer, if it has one
     unit TEXT,
+    image_url TEXT,
     match TEXT,                     -- how it was matched: ean, confirmed, same (name + size), size (other size), similar
     score INTEGER,                  -- 100 = same barcode or confirmed; name matches 60-95
     PRIMARY KEY (store, product_id, date)
@@ -172,7 +173,7 @@ def init(path: str) -> None:
             if col not in cols:
                 con.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(store_prices)")}
-        for col, kind in (("match", "TEXT"), ("score", "INTEGER")):
+        for col, kind in (("match", "TEXT"), ("score", "INTEGER"), ("image_url", "TEXT")):
             if col not in cols:
                 con.execute(f"ALTER TABLE store_prices ADD COLUMN {col} {kind}")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(suggestions)")}
@@ -812,7 +813,7 @@ def _latest_store_prices(con: sqlite3.Connection) -> dict[int, dict[str, dict[st
     """Latest check per product and store, only where the store sells it: {product_id: {store: {...}}}."""
     out: dict[int, dict[str, dict[str, Any]]] = {}
     for r in con.execute(
-        """SELECT s.store, s.product_id, s.date, s.article_id, s.title, s.price, s.original_price, s.unit, s.match, s.score
+        """SELECT s.store, s.product_id, s.date, s.article_id, s.title, s.price, s.original_price, s.unit, s.image_url, s.match, s.score
            FROM store_prices s
            JOIN (SELECT store, product_id, MAX(date) AS d FROM store_prices GROUP BY store, product_id) l
              ON l.store = s.store AND l.product_id = s.product_id AND l.d = s.date
@@ -820,7 +821,7 @@ def _latest_store_prices(con: sqlite3.Connection) -> dict[int, dict[str, dict[st
     ):
         out.setdefault(r["product_id"], {})[r["store"]] = {
             "article_id": r["article_id"], "title": r["title"], "price": r["price"], "original_price": r["original_price"],
-            "unit": r["unit"], "date": r["date"], "match": r["match"] or "ean", "score": r["score"] if r["score"] is not None else 100}
+            "unit": r["unit"], "image_url": r["image_url"], "date": r["date"], "match": r["match"] or "ean", "score": r["score"] if r["score"] is not None else 100}
     return out
 
 
@@ -866,10 +867,10 @@ def save_store_price(path: str, store: str, product_id: int, day: str, found: di
     f = found or {}
     with closing(_connect(path)) as con, con:
         con.execute(
-            """INSERT OR REPLACE INTO store_prices(store, product_id, date, article_id, title, price, original_price, unit, match, score)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT OR REPLACE INTO store_prices(store, product_id, date, article_id, title, price, original_price, unit, image_url, match, score)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (store, product_id, day, f.get("article_id"), f.get("title"), f.get("price"), f.get("original_price"), f.get("unit"),
-             f.get("match"), f.get("score")))
+             f.get("image_url"), f.get("match"), f.get("score")))
 
 
 def store_counts(path: str) -> dict[str, int]:

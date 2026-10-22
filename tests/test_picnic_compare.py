@@ -18,7 +18,7 @@ PRODUCTS = [(1, "Coca-Cola Regular", "Coca-Cola", "1,5 l"), (2, "Calvé Pindakaa
 GTINS = {1: ["8710400000011"], 2: ["8710400000028"], 3: []}
 ARTICLES = {
     "s1": NS(id="s1", name="Coca-Cola Regular", price=219, original_price=None, unit_quantity="1,5 liter"),
-    "s2": NS(id="s2", name="Calvé Pindakaas", price=379, original_price=None, unit_quantity="650 gram"),
+    "s2": NS(id="s2", name="Calvé Pindakaas", price=379, original_price=None, unit_quantity="650 gram", image_id="img2"),
     "s3": NS(id="s3", name="Picnic halfvolle melk", price=109, original_price=None, unit_quantity="1 liter"),
     "s4": NS(id="s4", name="Campina halfvolle melk", price=139, original_price=None, unit_quantity="1 liter"),
 }
@@ -61,7 +61,8 @@ class FakePicnic:
 
     def search(self, query):
         FakePicnic.calls += 1
-        return NS(items=[NS(id=a, name=ARTICLES[a].name, display_price=ARTICLES[a].price, unit_quantity=ARTICLES[a].unit_quantity)
+        return NS(items=[NS(id=a, name=ARTICLES[a].name, display_price=ARTICLES[a].price, unit_quantity=ARTICLES[a].unit_quantity,
+                            image_id=getattr(ARTICLES[a], "image_id", None))
                          for a in SEARCH.get(query, [])])
 
 
@@ -86,6 +87,7 @@ async def main():
     cola, calve, melk = (got[p]["picnic"] for p in (1, 2, 3))
     assert cola["match"] == "ean" and cola["score"] == 100
     assert calve["match"] == "size" and calve["score"] >= 90, calve  # same product, 650 g instead of 450 g
+    assert calve["image_url"] == "https://storefront-prod.nl.picnicinternational.com/static/images/img2/small.png", calve
     assert melk["article_id"] == "s3" and melk["match"] == "same", melk  # store brand vs store brand
     counts = await h._run(db.store_counts)
     assert counts == {"gtin_known": 2, "picnic_matched": 3}, counts

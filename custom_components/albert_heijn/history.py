@@ -702,7 +702,7 @@ class OrderHistory:
             await asyncio.sleep(STORE_PAUSE)
             candidates = await job(compare.picnic_search, client, query)
             if best := best_match(product, candidates, m["rejected"]):
-                found = {k: best.get(k) for k in ("article_id", "title", "price", "unit")}
+                found = {k: best.get(k) for k in ("article_id", "title", "price", "unit", "image_url")}
                 found.update(match=best["kind"], score=best["score"])
         await self._run(db.save_store_price, compare.PICNIC, pid, today, found)
 
@@ -752,6 +752,7 @@ class OrderHistory:
                    "ah_bonus": a.get("bonus"), "ah_size": a.get("unit_size"), "picnic": None}
             if p and p.get("price") is not None:
                 row.update(picnic=p["price"], picnic_title=p.get("title"), picnic_unit=p.get("unit"), picnic_article=p.get("article_id"),
+                           picnic_image=p.get("image_url"),
                            picnic_offer=bool(p.get("original_price")), match=p.get("match"), score=p.get("score"))
                 # another size: what your size would cost there (per kg / litre / piece)
                 mine, theirs = parse_size(a.get("unit_size") or a.get("title")), parse_size(p.get("unit") or p.get("title"))
