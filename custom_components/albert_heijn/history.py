@@ -224,7 +224,9 @@ class OrderHistory:
             self.suggestions = await self._run(db.get_suggestions, week)
         self.bonus_next = await self.async_bonus("next")
         if not self.meta.get("unconfirmed_other_sizes"):
-            # once: 0.28.0 also confirmed matches in another size; look for those again
+            # once (0.28.1): score the stored name matches with the current rules, undo 0.28.0's confirmations of
+            # another size, and look again for matches in another size (the same size may exist)
+            await self._run(db.rescore_name_matches, compare.PICNIC)
             n = await self._run(db.unconfirm_other_sizes, compare.PICNIC)
             self.meta["unconfirmed_other_sizes"] = _now()
             await self._run(db.set_meta, {"unconfirmed_other_sizes": self.meta["unconfirmed_other_sizes"]})

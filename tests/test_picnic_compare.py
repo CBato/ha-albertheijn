@@ -133,6 +133,12 @@ async def main():
     assert FakePicnic.calls == n + 2 and FakePicnic.article_calls == a + 2, (FakePicnic.calls - n, FakePicnic.article_calls - a)
     assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["match"] == "size"  # kind and score kept
 
+    # stored matches scored with old rules are scored again (no search): an old 95 for another size becomes 85
+    con = sqlite3.connect(Hass.config.path("albert_heijn.db"))
+    con.execute("UPDATE store_prices SET score = 95 WHERE store = 'picnic' AND product_id = 2"); con.commit(); con.close()
+    assert await h._run(db.rescore_name_matches, "picnic") == 1
+    assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["score"] == 85
+
     # only name matches of the same size count as confirmed automatically; the Calvé (other size, 85) does not
     assert await h._run(db.confirm_high_scores, "picnic", 95, now) == 0
     assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["match"] == "size"

@@ -13,9 +13,9 @@ import sqlite3
 from typing import Any
 
 try:
-    from .suggest import order_effective_prices, parse_size
+    from .suggest import MATCH_MIN_SCORE, match_score, order_effective_prices, parse_size
 except ImportError:  # standalone use
-    from suggest import order_effective_prices, parse_size  # type: ignore[no-redef]
+    from suggest import MATCH_MIN_SCORE, match_score, order_effective_prices, parse_size  # type: ignore[no-redef]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -1005,6 +1005,31 @@ def store_guesses(path: str, store: str, product_ids: list[int]) -> dict[int, di
                 WHERE s.store = ? AND s.article_id IS NULL AND s.guess IS NOT NULL""", (store, *product_ids, store)):
             out[r["product_id"]] = json.loads(r["guess"])
     return out
+
+
+def rescore_name_matches(path: str, store: str) -> int:
+    """Score the stored name matches (latest check, not confirmed) again with the current rules: the stored title and
+    size of the other product are enough, no search needed. Below the match score: removed, so looked for again."""
+    changed = 0
+    with closing(_connect(path)) as con, con:
+        rows = [dict(r) for r in con.execute(
+            """SELECT s.product_id, s.date, s.title AS their_title, s.unit, s.match, s.score, p.title, p.brand, p.unit_size
+               FROM store_prices s JOIN products p ON p.product_id = s.product_id
+               JOIN (SELECT product_id, MAX(date) AS d FROM store_prices WHERE store = ? GROUP BY product_id) x
+                 ON x.product_id = s.product_id AND x.d = s.date
+               WHERE s.store = ? AND s.article_id IS NOT NULL AND s.match IN ('same', 'size', 'similar')""", (store, store))]
+        for r in rows:
+            new = match_score({"title": r["title"], "brand": r["brand"], "unit_size": r["unit_size"]},
+                              {"title": r["their_title"], "unit": r["unit"]})
+            if new["score"] < MATCH_MIN_SCORE:
+                con.execute("DELETE FROM store_prices WHERE store = ? AND product_id = ? AND date = ?", (store, r["product_id"], r["date"]))
+            elif (new["kind"], new["score"]) != (r["match"], r["score"]):
+                con.execute("UPDATE store_prices SET match = ?, score = ? WHERE store = ? AND product_id = ? AND date = ?",
+                            (new["kind"], new["score"], store, r["product_id"], r["date"]))
+            else:
+                continue
+            changed += 1
+    return changed
 
 
 def unconfirm_other_sizes(path: str, store: str) -> int:
