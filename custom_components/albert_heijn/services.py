@@ -36,6 +36,7 @@ SERVICE_SNOOZE_PRODUCT = "snooze_product"
 SERVICE_CLEANUP_SUGGESTIONS = "cleanup_suggestions"
 SERVICE_COMPARE_LIST = "compare_list"
 SERVICE_SET_LIST_QUANTITY = "set_list_quantity"
+SERVICE_CONFIRM_MATCH = "confirm_match"
 
 ATTR_QUERY = "query"
 ATTR_PRODUCT_ID = "product_id"
@@ -141,6 +142,14 @@ SET_LIST_QUANTITY_SCHEMA = vol.Schema(
         vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int),
         vol.Required(ATTR_QUANTITY): _QUANTITY,
         vol.Optional("title", default=""): cv.string,
+    }
+)
+
+CONFIRM_MATCH_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int),
+        vol.Required("article_id"): cv.string,
+        vol.Required("confirmed"): cv.boolean,
     }
 )
 
@@ -273,6 +282,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Failed to set the quantity: {err}") from err
 
+    async def handle_confirm_match(call: ServiceCall) -> ServiceResponse:
+        """Confirm or reject the Picnic product matched to one of yours; returns what is matched now."""
+        try:
+            match = await _get_history(hass).async_confirm_match(
+                call.data[ATTR_PRODUCT_ID], call.data["article_id"], call.data["confirmed"])
+        except Exception as err:  # noqa: BLE001 - also errors of the Picnic library
+            raise HomeAssistantError(f"Could not update the match: {err}") from err
+        return {"picnic": match}
+
     async def handle_compare_list(call: ServiceCall) -> ServiceResponse:
         """The AH shopping list with the price at AH and at other stores (matched on EAN)."""
         try:
@@ -401,6 +419,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
+        SERVICE_CONFIRM_MATCH,
+        handle_confirm_match,
+        schema=CONFIRM_MATCH_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_COMPARE_LIST,
         handle_compare_list,
         supports_response=SupportsResponse.ONLY,
@@ -483,5 +509,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_CLEANUP_SUGGESTIONS,
         SERVICE_COMPARE_LIST,
         SERVICE_SET_LIST_QUANTITY,
+        SERVICE_CONFIRM_MATCH,
     ):
         hass.services.async_remove(DOMAIN, service)

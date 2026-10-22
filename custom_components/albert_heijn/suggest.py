@@ -293,3 +293,113 @@ def match_products(products: list[dict[str, Any]], query: str, limit: int = 4) -
     else:
         clear = len(hits) == 1
     return hits[:limit], clear
+
+
+# ---------- matching a product at another store by name and size ----------
+
+# size units -> (factor, dimension): grams, millilitres, pieces
+_UNITS = {"kg": (1000, "g"), "kilo": (1000, "g"), "g": (1, "g"), "gr": (1, "g"), "gram": (1, "g"),
+          "l": (1000, "ml"), "lt": (1000, "ml"), "ltr": (1000, "ml"), "liter": (1000, "ml"), "cl": (10, "ml"),
+          "ml": (1, "ml"), "st": (1, "st"), "stuk": (1, "st"), "stuks": (1, "st"), "stück": (1, "st")}
+_UNIT_RE = "|".join(sorted(_UNITS, key=len, reverse=True))
+_SIZE_WORDS = set(_UNITS) | {"x", "per", "ca", "circa", "stuk", "pak", "fles", "blik", "pot", "doos", "zak"}
+# store brands: different at every store, so the brand doesn't have to match (the product does)
+_HOUSE = {"ah", "albert", "heijn", "picnic", "excellent", "terra", "basic", "huismerk", "g&g"}
+MATCH_MIN_SCORE = 60  # below this a name match is not shown
+
+
+def parse_size(text: str | None) -> tuple[float, str] | None:
+    """Pack size as (amount, dimension) in grams, millilitres or pieces: "6 x 33 cl" -> (1980, "ml"),
+    "1,5 liter" -> (1500, "ml"), "450 gram" -> (450, "g"), "10 stuks" -> (10, "st"), "per stuk" -> (1, "st")."""
+    t = (text or "").lower().replace(",", ".")
+    if m := re.search(rf"(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*({_UNIT_RE})\b", t):
+        factor, dim = _UNITS[m[3]]
+        return round(int(m[1]) * float(m[2]) * factor, 3), dim
+    if m := re.search(rf"(\d+(?:\.\d+)?)\s*({_UNIT_RE})\b", t):
+        factor, dim = _UNITS[m[2]]
+        return round(float(m[1]) * factor, 3), dim
+    if re.search(r"\bper stuk\b", t):
+        return 1.0, "st"
+    return None
+
+
+def unit_price(price: float | None, size: tuple[float, str] | None) -> float | None:
+    """Price per kg, per litre or per piece."""
+    if price is None or not size or not size[0]:
+        return None
+    amount, dim = size
+    return round(price / amount * (1 if dim == "st" else 1000), 3)
+
+
+def _words(text: str) -> set[str]:
+    return {_stem(w) for w in _plain(text).split()
+            if w not in _SIZE_WORDS and w not in _FILLER and w not in _HOUSE and not any(c.isdigit() for c in w)}
+
+
+def is_house_brand(brand: str | None) -> bool:
+    words = _plain(brand or "").split()
+    return not words or words[0] in _HOUSE
+
+
+def search_query(title: str, brand: str | None = None) -> str:
+    """What to search for at another store: the product name without size and without the store brand."""
+    words = [w for w in _plain(title).split()
+             if w not in _SIZE_WORDS and w not in _HOUSE and not any(c.isdigit() for c in w)]
+    return " ".join(words)
+
+
+def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    """How well a product at another store matches one of yours, by name and size.
+
+    product: title, brand, unit_size. candidate: title, unit. Returns score (0-99; 100 is kept for the same barcode
+    or a match you confirmed) and kind: "same" (same name and size), "size" (same product, other size: compare per
+    kg/litre), "similar" (other size unit or unknown size). Words count when part of a compound word.
+    """
+    branded = not is_house_brand(product.get("brand"))
+    brand_words = _words(product.get("brand") or "") if branded else set()
+    # the brand is checked on its own; the product words (flavour, kind) must match without it
+    mine = _words(product.get("title") or "") - brand_words
+    theirs = _words(candidate.get("title") or "") - brand_words
+    if not mine or not theirs:
+        return {"score": 0, "kind": "similar"}
+
+    def found(word: str, others: set[str]) -> bool:
+        """A word also counts when it is part of a longer word ("scharrel" in "scharreleieren")."""
+        return word in others or (len(word) >= 3 and any(word in o for o in others))
+
+    def compact(text: str) -> str:
+        return "".join(w for w in _plain(text).split() if w not in _HOUSE and w not in _FILLER and not any(c.isdigit() for c in w))
+
+    if compact(product.get("title") or "").replace(compact(product.get("brand") or ""), "") ==             compact(candidate.get("title") or "").replace(compact(product.get("brand") or ""), ""):
+        hits, extra = len(mine), 0  # same words, only written apart or together ("scharrel eieren" / "scharreleieren")
+    else:
+        hits = sum(found(w, theirs) for w in mine)
+        extra = sum(not found(w, mine) and not any(m in w for m in mine if len(m) >= 3) for w in theirs)
+    score = 100 * (0.65 * hits / len(mine) + 0.35 * hits / (len(mine) + extra))
+    if branded:
+        # a branded product must be the same brand there
+        if brand_words and brand_words <= _words(candidate.get("title") or ""):
+            score += 10
+        else:
+            score = min(score, 50)
+    size_mine = parse_size(product.get("unit_size")) or parse_size(product.get("title"))
+    size_theirs = parse_size(candidate.get("unit")) or parse_size(candidate.get("title"))
+    if size_mine and size_theirs and size_mine[1] == size_theirs[1]:
+        kind = "same" if abs(size_mine[0] - size_theirs[0]) <= 0.03 * size_mine[0] else "size"
+        score -= 0 if kind == "same" else 5
+    else:
+        kind = "similar"
+        score -= 15
+    return {"score": max(0, min(95, round(score))), "kind": kind}  # 100 = same barcode or confirmed
+
+
+def best_match(product: dict[str, Any], candidates: list[dict[str, Any]], skip: set[str] | frozenset = frozenset()) -> dict[str, Any] | None:
+    """The best scoring candidate (not in skip) with score and kind, or None below MATCH_MIN_SCORE."""
+    best = None
+    for c in candidates:
+        if not c.get("article_id") or c["article_id"] in skip:
+            continue
+        m = {**c, **match_score(product, c)}
+        if best is None or m["score"] > best["score"]:
+            best = m
+    return best if best and best["score"] >= MATCH_MIN_SCORE else None

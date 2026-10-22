@@ -75,8 +75,23 @@ Set up the official **Picnic** integration of Home Assistant. This integration t
 looks up the products you buy at Picnic by barcode (EAN). There is nothing to configure here, and without the Picnic
 integration this step is skipped.
 
-Matching is on the barcode, so it covers branded products (Coca-Cola, Calvé). Store brands (AH, Picnic's own)
-have different barcodes and are not compared. `compare_list` and the "stores" field of `get_products` show the result.
+Each product you buy is matched in this order, and every match gets a kind and a score:
+
+| Kind | How | Score |
+|---|---|---|
+| `confirmed` | You confirmed this Picnic product (`confirm_match`) | 100 |
+| `ean` | Same barcode | 100 |
+| `same` | Found by name (without size and store brand), same size | 60–95 |
+| `size` | Same product, other size (Calvé 450 g vs 650 g): compared per kg / litre and recalculated to your size | 60–95 |
+| `similar` | Comparable product, size not comparable (pieces vs kg, or unknown) | 60–95 |
+
+A branded product only matches the same brand; a store brand (AH) can match another store brand (Picnic).
+Other flavours or variants (paprika vs naturel, regular vs zero) score below 60 and are not shown. A barcode often
+differs per pack size and sometimes per country label (a German Nutella jar), which is why the name match exists.
+
+`compare_list` totals: **sure** (barcode or confirmed) and **likely** (all matches, other sizes recalculated).
+Confirm a likely match to make it sure; reject it and the next best is looked up right away (a rejected product is
+never matched again).
 
 ### Assist sentences (optional)
 
@@ -220,7 +235,8 @@ All services are in the `albert_heijn` domain. Services marked with *response* r
 | `cleanup_suggestions` *response* | `days` (14), `snooze_days` (7), `dry_run` | Remove suggestions that were left untouched (see above) |
 | `snooze_product` *response* | `product_id`, `days` (7; -1 never, 0 again) | Don't suggest a product for a while |
 | `set_list_quantity` | `product_id`, `quantity` (0 removes), `title` | Set how many of a product are on the AH shopping list |
-| `compare_list` *response* | | The products on the shopping list with the AH price now and the Picnic price; totals over the products both sell |
+| `compare_list` *response* | | The shopping list with the AH price and the Picnic price (match kind, score, recalculated size); totals sure and likely |
+| `confirm_match` *response* | `product_id`, `article_id`, `confirmed` | Confirm or reject the Picnic product matched to one of yours; returns what is matched now |
 | `get_bonus` *response* | `week` (`current` / `next`) | Bonus on what you buy, with the price per item, your average and the saving |
 
 ### Analysis
@@ -289,7 +305,8 @@ New columns are added automatically on start. A JSON history from fork 0.6/0.7 i
 | `orders` | Order id, delivery date, status (`open` snapshot / `delivered`) |
 | `order_items` | Per order and product: quantity, price, price before bonus, bonus, unit price, `effective` (really paid) |
 | `products` | Title, brand, size, category, image, `in_catalog` (in "Eerder gekocht"), `gtin` (EAN), lookup timestamps |
-| `store_prices` | Weekly price at another store per product (`picnic`): article, title, price, price without offer; no article = not sold there |
+| `store_prices` | Weekly price at another store per product (`picnic`): article, title, price, price without offer, `match`, `score`; no article = not found |
+| `store_matches` | Matches you confirmed or rejected, per product and store article |
 | `prices` | Weekly price check: price, price before bonus, bonus, unit price, `effective` (per item at the offer) |
 | `receipts`, `receipt_items`, `pos_map` | Till receipts, their lines, till product number to webshop product (-1 = not online) |
 | `bonus_weeks`, `bonus_offers` | Bonus weeks and their offers (previously bought + personal) |

@@ -336,3 +336,28 @@ set_list_quantity:
       description: Product name (shown on the list until AH fills it in).
       selector:
         text:
+
+confirm_match:
+  name: Confirm or reject a store match
+  description: >-
+    Confirm that a Picnic product is the same as (or a good alternative for) one of yours, or reject it: a rejected
+    product is never matched again and the next best is looked up right away.
+  fields:
+    product_id:
+      name: Product ID
+      description: Your (AH) product.
+      required: true
+      selector:
+        number:
+          min: 1
+          mode: box
+    article_id:
+      name: Picnic article ID
+      required: true
+      selector:
+        text:
+    confirmed:
+      name: Confirmed
+      required: true
+      selector:
+        boolean:
