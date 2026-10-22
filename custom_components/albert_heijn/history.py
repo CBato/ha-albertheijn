@@ -613,7 +613,8 @@ class OrderHistory:
                     errors.append(f"EAN: {err}")
 
                 # 8. The same products at the other stores (Picnic only with its integration of Home Assistant)
-                for store in self.stores():
+                # Jumbo first: the EANs it lends (brands matched for sure) help Picnic in the same run
+                for store in sorted(self.stores(), key=lambda s: s != compare.JUMBO):
                     if err_store := await self._fetch_store(store, today):
                         errors.append(f"{compare.STORE_NAMES[store]}: {err_store}")
                 self.store_counts = await self._run(db.store_counts)
