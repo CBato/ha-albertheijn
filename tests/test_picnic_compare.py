@@ -1,6 +1,7 @@
 """Offline test: Picnic matching (barcode, else name and size), confirm/reject, and the list compared."""
 
 import asyncio
+import sqlite3
 from datetime import date, timedelta
 import os
 from types import SimpleNamespace as NS
@@ -90,7 +91,7 @@ async def main():
     got = await h._run(db.store_prices_for, [1, 2, 3])
     cola, calve, melk = (got[p]["picnic"] for p in (1, 2, 3))
     assert cola["match"] == "ean" and cola["score"] == 100
-    assert calve["match"] == "size" and calve["score"] >= 90, calve  # same product, 650 g instead of 450 g
+    assert calve["match"] == "size" and calve["score"] == 85, calve  # same product, 650 g instead of 450 g
     assert calve["image_url"] == "https://storefront-prod.nl.picnicinternational.com/static/images/img2/small.png", calve
     assert melk["article_id"] == "s3" and melk["match"] == "same", melk  # store brand vs store brand
     counts = await h._run(db.store_counts)
@@ -122,21 +123,27 @@ async def main():
     # product page shows it
     assert (await h._run(db.product_history, 3))["stores"]["picnic"]["article_id"] == "s4"
 
-    # a week later: matched products only get the price of their article, nothing is searched
+    # a week later: barcode and confirmed matches only get the price of their article; the Calvé (another size) is
+    # looked for again, a better match (the same size) may exist
     n, a = FakePicnic.calls, FakePicnic.article_calls
     next_week = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
     history.date = type("D", (date,), {"today": staticmethod(lambda: date.fromisoformat(next_week))})
     assert await h._fetch_picnic(next_week, now) is None
     history.date = date
-    assert FakePicnic.calls == n and FakePicnic.article_calls == a + 3, (FakePicnic.calls - n, FakePicnic.article_calls - a)
+    assert FakePicnic.calls == n + 2 and FakePicnic.article_calls == a + 2, (FakePicnic.calls - n, FakePicnic.article_calls - a)
     assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["match"] == "size"  # kind and score kept
 
-    # name matches of 95+ count as confirmed: the Calvé (95, other size); the price history stays
-    assert await h._run(db.confirm_high_scores, "picnic", 95, now) == 1
-    calve = (await h._run(db.store_prices_for, [2]))[2]["picnic"]
-    assert calve["match"] == "confirmed" and calve["score"] == 100
-    assert (await h._run(db.store_matches, "picnic"))[2]["confirmed"] == "s2"
+    # only name matches of the same size count as confirmed automatically; the Calvé (other size, 85) does not
     assert await h._run(db.confirm_high_scores, "picnic", 95, now) == 0
+    assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["match"] == "size"
+    # 0.28.0 did confirm other sizes: undone once, and the product is looked for again
+    await h._run(db.add_confirmed_match, "picnic", 2, "s2", now)
+    rows = lambda: sqlite3.connect(Hass.config.path("albert_heijn.db")).execute(  # noqa: E731
+        "SELECT COUNT(*) FROM store_prices WHERE store = 'picnic' AND product_id = 2").fetchone()[0]
+    before = rows()
+    assert await h._run(db.unconfirm_other_sizes, "picnic") == 1
+    assert rows() == before - 1  # the latest check is removed (older prices stay as history)
+    assert (await h._run(db.store_matches, "picnic")).get(2, {}).get("confirmed") is None
 
     # not found: the best guess below the match score is kept, to confirm by hand
     await h._run(db.save_store_price, "picnic", 9, today, None, {"article_id": "g1", "title": "Picnic kookroom", "price": 1.1, "score": 45})

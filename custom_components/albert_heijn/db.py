@@ -13,9 +13,9 @@ import sqlite3
 from typing import Any
 
 try:
-    from .suggest import order_effective_prices
+    from .suggest import order_effective_prices, parse_size
 except ImportError:  # standalone use
-    from suggest import order_effective_prices  # type: ignore[no-redef]
+    from suggest import order_effective_prices, parse_size  # type: ignore[no-redef]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -980,7 +980,7 @@ def confirm_high_scores(path: str, store: str, min_score: int, now: str) -> int:
             """SELECT s.product_id, s.article_id, s.date FROM store_prices s
                JOIN (SELECT product_id, MAX(date) AS d FROM store_prices WHERE store = ? GROUP BY product_id) x
                  ON x.product_id = s.product_id AND x.d = s.date
-               WHERE s.store = ? AND s.article_id IS NOT NULL AND s.match IN ('same', 'size', 'similar') AND s.score >= ?
+               WHERE s.store = ? AND s.article_id IS NOT NULL AND s.match = 'same' AND s.score >= ?
                  AND NOT EXISTS (SELECT 1 FROM store_matches m WHERE m.store = s.store AND m.product_id = s.product_id)""",
             (store, store, min_score))]
         for r in rows:
@@ -1004,4 +1004,32 @@ def store_guesses(path: str, store: str, product_ids: list[int]) -> dict[int, di
                   ON x.product_id = s.product_id AND x.d = s.date
                 WHERE s.store = ? AND s.article_id IS NULL AND s.guess IS NOT NULL""", (store, *product_ids, store)):
             out[r["product_id"]] = json.loads(r["guess"])
+    return out
+
+
+def unconfirm_other_sizes(path: str, store: str) -> int:
+    """Undo confirmations where the matched product has another size than yours (fork 0.28.0 confirmed name matches
+    of 95 automatically, also in another size). Those products are looked for again at the next store check."""
+    out = 0
+    with closing(_connect(path)) as con, con:
+        rows = [dict(r) for r in con.execute(
+            """SELECT m.product_id, m.article_id, p.unit_size, p.title, s.unit, s.title AS their_title, s.date
+               FROM store_matches m JOIN products p ON p.product_id = m.product_id
+               JOIN store_prices s ON s.store = m.store AND s.product_id = m.product_id AND s.article_id = m.article_id
+               JOIN (SELECT product_id, MAX(date) AS d FROM store_prices WHERE store = ? GROUP BY product_id) x
+                 ON x.product_id = s.product_id AND x.d = s.date
+               WHERE m.store = ? AND m.status = 'confirmed'""", (store, store))]
+        for r in rows:
+            mine = parse_size(r["unit_size"]) or parse_size(r["title"])
+            theirs = parse_size(r["unit"]) or parse_size(r["their_title"])
+            if mine and theirs and mine[1] == theirs[1] and abs(mine[0] - theirs[0]) > 0.03 * mine[0]:
+                con.execute("DELETE FROM store_matches WHERE store = ? AND product_id = ? AND article_id = ?",
+                            (store, r["product_id"], r["article_id"]))
+                con.execute("DELETE FROM store_prices WHERE store = ? AND product_id = ? AND date = ?", (store, r["product_id"], r["date"]))
+                out += 1
+        # unconfirmed matches in another size or similar: look for them again too (the same size may exist)
+        out += con.execute(
+            """DELETE FROM store_prices WHERE store = ? AND match IN ('size', 'similar')
+                 AND date = (SELECT MAX(date) FROM store_prices s2 WHERE s2.store = store_prices.store AND s2.product_id = store_prices.product_id)""",
+            (store,)).rowcount
     return out

@@ -19,7 +19,7 @@ def score(mine, theirs):
 
 
 # same product, other size
-assert score(("Calvé Pindakaas", "Calvé", "450 g"), ("Calvé pindakaas", "650 gram")) == {"score": 95, "kind": "size"}
+assert score(("Calvé Pindakaas", "Calvé", "450 g"), ("Calvé pindakaas", "650 gram")) == {"score": 85, "kind": "size"}
 # a branded product never matches a store brand
 assert score(("Calvé Pindakaas", "Calvé", "450 g"), ("Picnic pindakaas", "450 gram"))["score"] < s.MATCH_MIN_SCORE
 # store brand against store brand
@@ -35,7 +35,11 @@ assert score(("AH Pindakaas met stukjes", "AH", "350 g"), ("Picnic pindakaas", "
 assert score(("AH Bananen", "AH", "5 stuks"), ("Picnic bananen", "1 kg"))["kind"] == "similar"
 
 # real examples: bio = biologisch, packaging words, compound words, weak adjectives, "per kilo" vs "ca. 800 gram"
-assert score(("AH Biologisch Pompoen", "AH Biologisch", "los per kilo"), ("Bio pompoen", "1 stuk (ca. 800 gram)")) == {"score": 95, "kind": "size"}
+assert score(("AH Biologisch Pompoen", "AH Biologisch", "los per kilo"), ("Bio pompoen", "1 stuk (ca. 800 gram)")) == {"score": 82, "kind": "size"}
+# same size first, another size lower (worse the bigger the difference), every extra word costs ("met appel")
+hak = [score(("Hak Rode kool", "Hak", "700 g"), t) for t in
+       (("Hak rode kool", "700 gram"), ("Hak rode kool met appel", "700 gram"), ("Hak rode kool", "355 gram"), ("Hak rode kool met appel", "355 gram"))]
+assert [h["score"] for h in hak] == [95, 90, 80, 65] and hak[0]["kind"] == "same" and hak[2]["kind"] == "size", hak
 assert score(("AH Andijvie fijngesneden grootverpakking", "AH", "500 g"), ("Picnic andijvie fijngesneden", "500 gram"))["score"] == 95
 assert score(("AH Rucola slamelange", "AH", "75 g"), ("Picnic rucola melange", "75 gram"))["score"] == 95
 assert score(("Bolletje Echte beschuit", "Bolletje", "13 stuks"), ("Bolletje beschuit", "13 stuks"))["score"] == 95

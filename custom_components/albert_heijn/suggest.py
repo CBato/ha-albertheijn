@@ -318,7 +318,9 @@ _SYNONYMS = {"biologisch": "bio", "biologische": "bio", "organic": "bio", "eko":
 # store brands: different at every store, so the brand doesn't have to match (the product does)
 _HOUSE = {"ah", "albert", "heijn", "picnic", "excellent", "terra", "basic", "huismerk", "g&g"}
 MATCH_MIN_SCORE = 60  # below this a name match is not shown
-AUTO_CONFIRM_SCORE = 95  # a name match this good counts as confirmed (you can still reject it)
+AUTO_CONFIRM_SCORE = 95  # a name match this good counts as confirmed (you can still reject it); only the same size
+SIZE_MAX_SCORE = 85  # same product in another size: at most this (so never confirmed automatically)
+EXTRA_WORD_PENALTY = 15  # per word the other product has extra ("met appel")
 GUESS_MIN_SCORE = 30  # below the match score: kept as "best guess" to confirm by hand
 
 
@@ -386,8 +388,9 @@ def search_queries(title: str, brand: str | None = None) -> list[str]:
 def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     """How well a product at another store matches one of yours, by name and size.
 
-    product: title, brand, unit_size. candidate: title, unit. Returns score (0-99; 100 is kept for the same barcode
-    or a match you confirmed) and kind: "same" (same name and size), "size" (same product, other size: compare per
+    product: title, brand, unit_size. candidate: title, unit. Score: the share of your words found there, minus
+    EXTRA_WORD_PENALTY per extra word; +5 for the same brand. 0-95 (100 is kept for the same barcode or a match you
+    confirmed). Kind: "same" (same name and size), "size" (same product, other size: compare per
     kg/litre), "similar" (other size unit or unknown size). Words count when part of a compound word.
     """
     branded = not is_house_brand(product.get("brand"))
@@ -417,18 +420,24 @@ def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str,
     else:
         hits = sum(found(w, theirs) for w in mine)
         extra = sum(not found(w, mine) for w in theirs)
-    score = 100 * (0.65 * hits / len(mine) + 0.35 * hits / (len(mine) + extra))
+    # your words found there, minus every word they have extra ("rode kool" vs "rode kool met appel")
+    score = 100 * hits / len(mine) - EXTRA_WORD_PENALTY * extra
     if branded:
         # a branded product must be the same brand there
         if brand_words and brand_words <= _words(candidate.get("title") or ""):
-            score += 10
+            score += 5
         else:
             score = min(score, 50)
     size_mine = parse_size(product.get("unit_size")) or parse_size(product.get("title"))
     size_theirs = parse_size(candidate.get("unit")) or parse_size(candidate.get("title"))
     if size_mine and size_theirs and size_mine[1] == size_theirs[1]:
-        kind = "same" if abs(size_mine[0] - size_theirs[0]) <= 0.03 * size_mine[0] else "size"
-        score -= 0 if kind == "same" else 5
+        ratio = max(size_mine[0], size_theirs[0]) / max(min(size_mine[0], size_theirs[0]), 0.001)
+        if ratio <= 1.03:
+            kind = "same"
+        else:
+            # another size: never as good as the same size, and worse the bigger the difference (355 vs 700 g: ~75)
+            kind = "size"
+            score = min(score - 15 - 10 * math.log2(ratio), SIZE_MAX_SCORE)
     else:
         kind = "similar"
         score -= 15

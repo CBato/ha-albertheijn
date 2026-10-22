@@ -223,6 +223,13 @@ class OrderHistory:
         if week := self.meta.get("suggest_week"):
             self.suggestions = await self._run(db.get_suggestions, week)
         self.bonus_next = await self.async_bonus("next")
+        if not self.meta.get("unconfirmed_other_sizes"):
+            # once: 0.28.0 also confirmed matches in another size; look for those again
+            n = await self._run(db.unconfirm_other_sizes, compare.PICNIC)
+            self.meta["unconfirmed_other_sizes"] = _now()
+            await self._run(db.set_meta, {"unconfirmed_other_sizes": self.meta["unconfirmed_other_sizes"]})
+            if n:
+                _LOGGER.info("Albert Heijn: %d Picnic matches in another size are looked for again", n)
         if n := await self._run(db.confirm_high_scores, compare.PICNIC, AUTO_CONFIRM_SCORE, _now()):
             _LOGGER.info("Albert Heijn: %d Picnic matches with score %d+ confirmed", n, AUTO_CONFIRM_SCORE)
 
@@ -708,9 +715,10 @@ class OrderHistory:
         if m["confirmed"]:
             if found := await job(compare.picnic_article, client, m["confirmed"]):
                 found.update(match="confirmed", score=100)
-        # matched before: only the new price of that article (search again only when it is gone)
+        # matched before on barcode or same name and size: only the new price of that article (search again only when
+        # it is gone). Another size or a similar product: search again, a better match may exist (the same size).
         last = product.get("last_article")
-        if not found and last and last not in m["rejected"] and product.get("last_match") != "confirmed":
+        if not found and last and last not in m["rejected"] and product.get("last_match") in ("ean", "same"):
             if found := await job(compare.picnic_article, client, last):
                 found.update(match=product.get("last_match") or "ean", score=product.get("last_score") or 100)
         for gtin in product.get("gtins") or ([product["gtin"]] if product.get("gtin") else []):
@@ -734,7 +742,7 @@ class OrderHistory:
             elif best := best_match(product, list(candidates.values()), m["rejected"], GUESS_MIN_SCORE):
                 # not good enough to count, but worth a look: confirm it by hand
                 guess = {k: best.get(k) for k in ("article_id", "title", "price", "unit", "image_url", "score", "kind")}
-        if found and found.get("match") in ("same", "size", "similar") and found["score"] >= AUTO_CONFIRM_SCORE:
+        if found and found.get("match") == "same" and found["score"] >= AUTO_CONFIRM_SCORE:
             await self._run(db.add_confirmed_match, compare.PICNIC, pid, found["article_id"], _now())
             found.update(match="confirmed", score=100)
         await self._run(db.save_store_price, compare.PICNIC, pid, today, found, guess)
