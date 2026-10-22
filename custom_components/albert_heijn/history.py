@@ -57,6 +57,8 @@ STORE_RETRY_DAYS = 28  # a product not found at a store is looked for again afte
 STORE_MAX = 150  # per sync
 STORE_PAUSE = 1.0  # seconds between requests to another store
 STORE_TIMEOUT = 20  # seconds; a slow or hanging store stops this round instead of holding the sync
+STORE_BACKOFF = 30  # seconds to wait after an error (x the number of errors in a row), then go on
+STORE_MAX_ERRORS = 3  # errors in a row before stopping this round (the rest follows next time)
 CATALOG_EVERY_DAYS = 7
 SUMMARY_PAGE = 25
 SUMMARY_MAX_PAGES = 40  # 1000 orders
@@ -572,6 +574,11 @@ class OrderHistory:
                 if err_picnic := await self._fetch_picnic(today, now):
                     errors.append(f"Picnic: {err_picnic}")
                 self.store_counts = await self._run(db.store_counts)
+                # still to do at Picnic (e.g. after an interrupted round)
+                if compare.picnic_credentials(self._hass):
+                    self.store_counts["picnic_todo"] = len(await self._run(
+                        db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), 5000, False,
+                        (date.today() - timedelta(days=STORE_RETRY_DAYS - 1)).isoformat()))
 
             self.meta["synced_at"] = now
             await self._run(db.set_meta, self.meta)
@@ -761,12 +768,19 @@ class OrderHistory:
         if not client:
             return err
         matches = await self._run(db.store_matches, compare.PICNIC)
+        errors, done = 0, 0
         for product in due:
             try:
                 await self._picnic_check(client, product, matches, today)
             except Exception as err:  # noqa: BLE001 - the Picnic library raises its own and requests' errors
-                _LOGGER.debug("Picnic check of %s failed: %s", product["product_id"], err)
-                return str(err)[:200]
+                # e.g. Picnic slowing down (an empty answer): wait and go on; the product stays due for next time
+                errors += 1
+                _LOGGER.warning("Picnic check of %s failed (%d in a row): %s", product["product_id"], errors, err)
+                if errors >= STORE_MAX_ERRORS:
+                    return f"{str(err)[:150]} - gestopt na {done} producten; de rest volgt bij de volgende ronde"
+                await asyncio.sleep(STORE_BACKOFF * errors)
+                continue
+            errors, done = 0, done + 1
             await asyncio.sleep(STORE_PAUSE)
         return None
 

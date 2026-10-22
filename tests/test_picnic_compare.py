@@ -155,6 +155,31 @@ async def main():
     await h._run(db.save_store_price, "picnic", 9, today, None, {"article_id": "g1", "title": "Picnic kookroom", "price": 1.1, "score": 45})
     assert (await h._run(db.store_guesses, "picnic", [9, 1]))[9]["article_id"] == "g1"
 
+    # Picnic answers nonsense now and then: wait and go on; 3 in a row: stop, the rest stays due
+    history.STORE_BACKOFF = 0
+    orig = FakePicnic.get_article_by_gtin
+    flaky = {"n": 0}
+
+    def once_broken(self, gtin):
+        flaky["n"] += 1
+        if flaky["n"] == 1:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return orig(self, gtin)
+    FakePicnic.get_article_by_gtin = once_broken
+    await h._run(db.save_order, 11, "2026-10-19", "delivered", [{"product_id": 7, "title": "Coca-Cola Light", "brand": "Coca-Cola",
+                                                                  "unit_size": "1,5 l", "quantity": 1, "price": 2.0}], now)
+    await h._run(db.save_gtins, 7, ["8710400000077"], now)
+    assert await h._fetch_picnic("2026-11-30", now) is None  # one error, then on
+    for pid in (21, 22, 23):  # three new products, Picnic keeps failing
+        await h._run(db.save_order, 100 + pid, "2026-10-19", "delivered", [{"product_id": pid, "title": f"Merk product {pid}", "brand": "Merk",
+                                                                             "unit_size": "1 l", "quantity": 1, "price": 1.0}], now)
+        await h._run(db.save_gtins, pid, [f"87104000000{pid}"], now)
+    FakePicnic.get_article_by_gtin = lambda self, gtin: (_ for _ in ()).throw(ValueError("Expecting value"))
+    err = await h._fetch_picnic("2026-12-30", now)
+    assert err and "gestopt na" in err, err
+    assert {21, 22, 23} <= {p["product_id"] for p in await h._run(db.store_due, "picnic", "2026-10-22", 100)}  # still to do
+    FakePicnic.get_article_by_gtin = orig
+
     # without the Picnic integration: skipped, no error
     Hass.config_entries = ConfigEntries()
     n = FakePicnic.calls
