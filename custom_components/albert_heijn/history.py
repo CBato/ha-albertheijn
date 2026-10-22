@@ -22,6 +22,7 @@ from .api import AlbertHeijnApi, AlbertHeijnApiError, Fulfillment
 from .suggest import (
     REGULAR_DAYS,
     best_match,
+    match_score,
     compute_suggestions,
     effective_price,
     eur,
@@ -190,6 +191,7 @@ class OrderHistory:
         self._path = hass.config.path(DB_FILE)
         self._lock = asyncio.Lock()  # one sync at a time
         self._list_lock = asyncio.Lock()  # one change of the shopping list at a time (fill / cleanup)
+        self._max: int | None = None  # products per heavy step in the running sync (None = the default)
         self.meta: dict[str, str] = {}
         self.summary: dict[str, Any] = {}
         self._frequent: list[dict[str, Any]] = []
@@ -302,6 +304,7 @@ class OrderHistory:
         spent = [p["amount"] for p in purchases if p.get("amount") is not None]
         data["rhythm"] = rhythm
         data["snoozed_until"] = self.snoozes.get(product_id)
+        data["picnic_connected"] = compare.picnic_credentials(self._hass) is not None
         data["totals"] = {
             "purchases": len(purchases),
             "quantity": round(sum(float(p.get("quantity") or 0) for p in purchases), 1),
@@ -412,14 +415,17 @@ class OrderHistory:
         return {"removed": [s["title"] for s in remove], "kept": len(stale) - len(done), "dry_run": dry_run}
 
     async def async_sync(
-        self, open_orders: list[Fulfillment], refresh_catalog: bool = False, refresh_prices: bool = False, heavy: bool = True
+        self, open_orders: list[Fulfillment], refresh_catalog: bool = False, refresh_prices: bool = False, heavy: bool = True,
+        max_products: int | None = None,
     ) -> bool:
         """Fetch new delivered orders, receipts and bonus; with heavy also the catalog, prices, product details, EAN
         codes and other stores (each when due, a limited number per run). Returns True if anything changed.
 
         Light runs (after a restart, after a delivery) keep Home Assistant responsive while it is busy; the heavy
-        part runs at night or when asked for (sync_history, fill_list).
+        part runs at night or when asked for (sync_history, fill_list). max_products: how many products per step
+        (details, EAN, other stores) in this run; default DETAILS_MAX / GTIN_MAX / STORE_MAX.
         """
+        self._max = max_products
         if self._lock.locked():
             return False
         async with self._lock:
@@ -666,7 +672,7 @@ class OrderHistory:
         """Look up the EAN of bought products that don't have one yet (each at most once every GTIN_EVERY_DAYS)."""
         tried_before = (datetime.now(timezone.utc) - timedelta(days=GTIN_EVERY_DAYS)).isoformat()
         found = 0
-        for pid in await self._run(db.missing_gtins, tried_before, GTIN_MAX):
+        for pid in await self._run(db.missing_gtins, tried_before, self._max or GTIN_MAX):
             codes = await self._api.get_product_gtins(pid)
             await self._run(db.save_gtins, pid, codes, now)
             found += bool(codes)
@@ -708,7 +714,7 @@ class OrderHistory:
 
     async def _fetch_picnic(self, today: str, now: str) -> str | None:
         """Weekly: every bought product at Picnic (barcode, else name and size). Returns an error text, or None."""
-        due = await self._run(db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), STORE_MAX)
+        due = await self._run(db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), self._max or STORE_MAX)
         if not due:
             return None
         client, err = await self._picnic()
@@ -723,6 +729,19 @@ class OrderHistory:
                 return str(err)[:200]
             await asyncio.sleep(STORE_PAUSE)
         return None
+
+    async def async_search_store(self, product_id: int, query: str | None = None) -> dict[str, Any]:
+        """Search Picnic for one of your products (by default its name without size and store brand); every result
+        with its match score, best first. Choosing one = confirm_match."""
+        product = await self._run(db.product_for_store, product_id) or {"product_id": product_id, "title": query or ""}
+        query = (query or search_query(product.get("title") or "", product.get("brand")) or product.get("title") or "").strip()
+        client, err = await self._picnic()
+        if not client:
+            return {"query": query, "items": [], "error": err or "Picnic integration not set up"}
+        found = await asyncio.wait_for(self._hass.async_add_executor_job(compare.picnic_search, client, query, 12), STORE_TIMEOUT)
+        items = [{**c, **match_score(product, c)} for c in found]
+        items.sort(key=lambda c: -c["score"])
+        return {"query": query, "items": items}
 
     async def async_confirm_match(self, product_id: int, article_id: str, confirmed: bool) -> dict[str, Any] | None:
         """Confirm or reject the Picnic product matched to one of yours, and look again right away
@@ -774,7 +793,7 @@ class OrderHistory:
     async def _fetch_details(self, now: str) -> bool:
         """Look up products that lack a title, category or image (each at most once every DETAILS_EVERY_DAYS)."""
         tried_before = (datetime.now(timezone.utc) - timedelta(days=DETAILS_EVERY_DAYS)).isoformat()
-        ids = await self._run(db.missing_details, tried_before, DETAILS_MAX)
+        ids = await self._run(db.missing_details, tried_before, self._max or DETAILS_MAX)
         filled = 0
         for i in range(0, len(ids), PRICE_BATCH):
             batch = ids[i : i + PRICE_BATCH]

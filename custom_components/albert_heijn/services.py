@@ -37,6 +37,7 @@ SERVICE_CLEANUP_SUGGESTIONS = "cleanup_suggestions"
 SERVICE_COMPARE_LIST = "compare_list"
 SERVICE_SET_LIST_QUANTITY = "set_list_quantity"
 SERVICE_CONFIRM_MATCH = "confirm_match"
+SERVICE_SEARCH_STORE = "search_store_products"
 
 ATTR_QUERY = "query"
 ATTR_PRODUCT_ID = "product_id"
@@ -119,7 +120,10 @@ FILL_LIST_SCHEMA = vol.Schema(
 PRODUCT_ID_SCHEMA = vol.Schema({vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int)})
 
 SYNC_HISTORY_SCHEMA = vol.Schema(
-    {vol.Optional(ATTR_REFRESH_CATALOG, default=False): cv.boolean}
+    {
+        vol.Optional(ATTR_REFRESH_CATALOG, default=False): cv.boolean,
+        vol.Optional("max_products"): vol.All(vol.Coerce(int), vol.Range(min=1, max=2000)),
+    }
 )
 
 CLEANUP_SUGGESTIONS_SCHEMA = vol.Schema(
@@ -151,6 +155,10 @@ CONFIRM_MATCH_SCHEMA = vol.Schema(
         vol.Required("article_id"): cv.string,
         vol.Required("confirmed"): cv.boolean,
     }
+)
+
+SEARCH_STORE_SCHEMA = vol.Schema(
+    {vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int), vol.Optional(ATTR_QUERY): cv.string}
 )
 
 GET_BONUS_SCHEMA = vol.Schema({vol.Optional("week", default="current"): vol.In(["current", "next"])})
@@ -282,6 +290,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Failed to set the quantity: {err}") from err
 
+    async def handle_search_store(call: ServiceCall) -> ServiceResponse:
+        """Search Picnic for one of your products; results with match score (choose one with confirm_match)."""
+        try:
+            return await _get_history(hass).async_search_store(call.data[ATTR_PRODUCT_ID], call.data.get(ATTR_QUERY))
+        except Exception as err:  # noqa: BLE001 - also errors and timeouts of the Picnic library
+            raise HomeAssistantError(f"Search at Picnic failed: {err}") from err
+
     async def handle_confirm_match(call: ServiceCall) -> ServiceResponse:
         """Confirm or reject the Picnic product matched to one of yours; returns what is matched now."""
         try:
@@ -332,7 +347,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     async def handle_sync_history(call: ServiceCall) -> ServiceResponse:
         """Fetch new delivered orders now (normally once a day)."""
         coordinator = _get_coordinator(hass)
-        changed = await coordinator.async_sync_history(call.data[ATTR_REFRESH_CATALOG])
+        changed = await coordinator.async_sync_history(call.data[ATTR_REFRESH_CATALOG], max_products=call.data.get("max_products"))
         history = coordinator.history
         return {
             "changed": changed,
@@ -415,6 +430,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         SERVICE_SET_LIST_QUANTITY,
         handle_set_list_quantity,
         schema=SET_LIST_QUANTITY_SCHEMA,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SEARCH_STORE,
+        handle_search_store,
+        schema=SEARCH_STORE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
 
     hass.services.async_register(
@@ -510,5 +533,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_COMPARE_LIST,
         SERVICE_SET_LIST_QUANTITY,
         SERVICE_CONFIRM_MATCH,
+        SERVICE_SEARCH_STORE,
     ):
         hass.services.async_remove(DOMAIN, service)

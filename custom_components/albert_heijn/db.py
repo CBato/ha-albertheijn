@@ -463,9 +463,12 @@ def product_history(path: str, product_id: int) -> dict[str, Any]:
             )
         ]
         stores = _latest_store_prices(con).get(product_id) or {}
+        # last check per store, also when nothing was found ("not found" vs "not checked yet")
+        checked = {r["store"]: r["d"] for r in con.execute(
+            "SELECT store, MAX(date) AS d FROM store_prices WHERE product_id = ? GROUP BY store", (product_id,))}
     purchases.sort(key=lambda x: x["date"])
     return {"product": dict(prod) if prod else {"product_id": product_id}, "purchases": purchases, "prices": prices,
-            "stores": stores}
+            "stores": stores, "store_checked": checked}
 
 
 def insights(path: str, today: str, weeks: int = 12) -> dict[str, Any]:

@@ -232,13 +232,14 @@ All services are in the `albert_heijn` domain. Services marked with *response* r
 
 | Service | Fields | Does |
 |---|---|---|
-| `sync_history` *response* | `refresh_catalog` (false) | Sync now; returns the summary |
+| `sync_history` *response* | `refresh_catalog` (false), `max_products` (150, up to 2000) | Sync now, incl. the heavy part; `max_products: 2000` does everything at once instead of 150 per night |
 | `get_frequent_items` *response* | `limit` (100, max 1000), `include_catalog` (true) | Products by how often and recently bought, with rhythm and `due`; then the rest of "Eerder gekocht" |
 | `fill_list` *response* | `dry_run`, `min_count` (3), `min_share` (0.3), `max_items` (25) | Put the suggestions on the AH shopping list; `dry_run` only returns them |
 | `cleanup_suggestions` *response* | `days` (14), `snooze_days` (7), `dry_run` | Remove suggestions that were left untouched (see above) |
 | `snooze_product` *response* | `product_id`, `days` (7; -1 never, 0 again) | Don't suggest a product for a while |
 | `set_list_quantity` | `product_id`, `quantity` (0 removes), `title` | Set how many of a product are on the AH shopping list |
 | `compare_list` *response* | | The shopping list with the AH price and the Picnic price (match kind, score, recalculated size); totals sure and likely |
+| `search_store_products` *response* | `product_id`, `query` (optional) | Search Picnic for one of your products; results with match score, best first |
 | `confirm_match` *response* | `product_id`, `article_id`, `confirmed` | Confirm or reject the Picnic product matched to one of yours; returns what is matched now |
 | `get_bonus` *response* | `week` (`current` / `next`) | Bonus on what you buy, with the price per item, your average and the saving |
 

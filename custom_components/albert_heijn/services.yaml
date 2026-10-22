@@ -156,6 +156,17 @@ sync_history:
       default: false
       selector:
         boolean:
+    max_products:
+      name: Products per step
+      description: >-
+        How many products to handle per step (details, EAN, other stores) in this run. Default 150 (the nightly
+        amount); up to 2000 to do everything at once (takes a while, with pauses between requests).
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 2000
+          mode: box
 
 fill_list:
   name: Fill the shopping list
@@ -361,3 +372,23 @@ confirm_match:
       required: true
       selector:
         boolean:
+
+search_store_products:
+  name: Search Picnic for a product
+  description: >-
+    Search Picnic for one of your products (by default by its name without size and store brand). Every result
+    comes with a match score; choose one with confirm_match.
+  fields:
+    product_id:
+      name: Product ID
+      description: Your (AH) product.
+      required: true
+      selector:
+        number:
+          min: 1
+          mode: box
+    query:
+      name: Search for
+      description: Optional; default the product name.
+      selector:
+        text:

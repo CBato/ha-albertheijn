@@ -107,6 +107,14 @@ async def main():
     c = await h.async_compare_list()
     assert c["totals"]["n"] == 2 and c["totals"]["picnic"] == 4.38 + 2.78, c["totals"]
 
+    # search by hand: results with score, best first; choosing one = confirm
+    res = await h.async_search_store(3)
+    assert res["query"] == "halfvolle melk" and [i["article_id"] for i in res["items"]][:1] == ["s3"] and res["items"][0]["score"] >= 90, res
+    res = await h.async_search_store(2, "calve pindakaas")
+    assert res["items"][0]["kind"] == "size"
+    ph = await h._run(db.product_history, 2)
+    assert ph["store_checked"]["picnic"] == today
+
     # product page shows it
     assert (await h._run(db.product_history, 3))["stores"]["picnic"]["article_id"] == "s4"
 

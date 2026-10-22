@@ -197,13 +197,13 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
         self._update_tokens()
         return result
 
-    async def async_sync_history(self, refresh_catalog: bool = False, heavy: bool = True) -> bool:
+    async def async_sync_history(self, refresh_catalog: bool = False, heavy: bool = True, max_products: int | None = None) -> bool:
         """Update the stored order history and notify the sensors."""
         if not self.history:
             return False
         open_orders = self.data.fulfillments if self.data else []
         try:
-            changed = await self.history.async_sync(open_orders, refresh_catalog, heavy=heavy)
+            changed = await self.history.async_sync(open_orders, refresh_catalog, heavy=heavy, max_products=max_products)
         except AlbertHeijnAuthError:
             _LOGGER.warning("Albert Heijn: order history sync needs a new login")
             return False
