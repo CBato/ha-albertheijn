@@ -89,7 +89,13 @@ Each product you buy is matched in this order, and every match gets a kind and a
 | `size` | Same product, other size (Calvé 450 g vs 650 g): compared per kg / litre and recalculated to your size | 60–95 |
 | `similar` | Comparable product, size not comparable (pieces vs kg, or unknown) | 60–95 |
 
-A branded product only matches the same brand; a store brand (AH) can match another store brand (Picnic).
+A branded product only matches the same brand (at least half of its words, "Mentos Gum" / "Mentos"); a store brand
+(AH, also De Zaanse Hoeve, Care, Streeckgenoten) can match another store brand (Picnic). Score: the share of your
+words found there, minus 15 per extra word and another 15 when a word is swapped (another flavour), +5 for the
+brand. Grades must agree ("48+" / "30+", "0%" / "5%": at most 40). Words that say nothing ("echte", "luxe", "thee",
+"pitloze", packaging like "grootverpakking") are left out; colours, "zero"/"0%" and "bio"/"biologisch" are the
+same word; "koppen", "cups" and "capsules" count as pieces. The rules were tuned on a real export of matches;
+the examples are in `tests/test_store_match.py`.
 Other flavours or variants (paprika vs naturel, regular vs zero) score below 60 and are not shown. A barcode often
 differs per pack size and sometimes per country label (a German Nutella jar), which is why the name match exists.
 

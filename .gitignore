@@ -32,3 +32,6 @@ Thumbs.db
 
 # Test databases
 tests/tmp*/
+
+# Real exports for local regression checks (personal purchase data, never commit)
+tests/data/

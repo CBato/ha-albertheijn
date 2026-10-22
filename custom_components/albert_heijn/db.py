@@ -13,9 +13,9 @@ import sqlite3
 from typing import Any
 
 try:
-    from .suggest import MATCH_MIN_SCORE, match_score, order_effective_prices, parse_size
+    from .suggest import AUTO_CONFIRM_SCORE, MATCH_MIN_SCORE, match_score, order_effective_prices, parse_size
 except ImportError:  # standalone use
-    from suggest import MATCH_MIN_SCORE, match_score, order_effective_prices, parse_size  # type: ignore[no-redef]
+    from suggest import AUTO_CONFIRM_SCORE, MATCH_MIN_SCORE, match_score, order_effective_prices, parse_size  # type: ignore[no-redef]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS store_matches (
     store TEXT NOT NULL,
     product_id INTEGER NOT NULL,
     article_id TEXT NOT NULL,
-    status TEXT NOT NULL,           -- 'confirmed' (use this one) or 'rejected' (never suggest it again)
+    status TEXT NOT NULL,           -- 'confirmed' (by you), 'auto' (by the score) or 'rejected' (never again)
     updated TEXT,
     PRIMARY KEY (store, product_id, article_id)
 );
@@ -933,7 +933,7 @@ def store_matches(path: str, store: str) -> dict[int, dict[str, Any]]:
     with closing(_connect(path)) as con:
         for r in con.execute("SELECT product_id, article_id, status FROM store_matches WHERE store = ?", (store,)):
             m = out.setdefault(r["product_id"], {"confirmed": None, "rejected": set()})
-            if r["status"] == "confirmed":
+            if r["status"] in ("confirmed", "auto"):
                 m["confirmed"] = r["article_id"]
             else:
                 m["rejected"].add(r["article_id"])
@@ -944,7 +944,8 @@ def set_store_match(path: str, store: str, product_id: int, article_id: str, con
     """Confirm a match (replaces an earlier confirmed one) or reject it; the product is checked again right away."""
     with closing(_connect(path)) as con, con:
         if confirmed:
-            con.execute("DELETE FROM store_matches WHERE store = ? AND product_id = ? AND status = 'confirmed'", (store, product_id))
+            con.execute("DELETE FROM store_matches WHERE store = ? AND product_id = ? AND status IN ('confirmed', 'auto')",
+                        (store, product_id))
         con.execute(
             """INSERT INTO store_matches(store, product_id, article_id, status, updated) VALUES(?, ?, ?, ?, ?)
                ON CONFLICT(store, product_id, article_id) DO UPDATE SET status = excluded.status, updated = excluded.updated""",
@@ -963,14 +964,16 @@ def product_for_store(path: str, product_id: int) -> dict[str, Any] | None:
             "brand": r["brand"], "unit_size": r["unit_size"]}
 
 
-def add_confirmed_match(path: str, store: str, product_id: int, article_id: str, now: str) -> None:
-    """Remember a match as confirmed, without touching the price checks (see set_store_match for the UI)."""
+def add_confirmed_match(path: str, store: str, product_id: int, article_id: str, now: str, status: str = "auto") -> None:
+    """Remember a match as confirmed ('auto' = by the score), without touching the price checks (set_store_match is the
+    UI's)."""
     with closing(_connect(path)) as con, con:
-        con.execute("DELETE FROM store_matches WHERE store = ? AND product_id = ? AND status = 'confirmed'", (store, product_id))
+        con.execute("DELETE FROM store_matches WHERE store = ? AND product_id = ? AND status IN ('confirmed', 'auto')",
+                    (store, product_id))
         con.execute(
-            """INSERT INTO store_matches(store, product_id, article_id, status, updated) VALUES(?, ?, ?, 'confirmed', ?)
-               ON CONFLICT(store, product_id, article_id) DO UPDATE SET status = 'confirmed', updated = excluded.updated""",
-            (store, product_id, article_id, now))
+            """INSERT INTO store_matches(store, product_id, article_id, status, updated) VALUES(?, ?, ?, ?, ?)
+               ON CONFLICT(store, product_id, article_id) DO UPDATE SET status = excluded.status, updated = excluded.updated""",
+            (store, product_id, article_id, status, now))
 
 
 def confirm_high_scores(path: str, store: str, min_score: int, now: str) -> int:
@@ -984,7 +987,7 @@ def confirm_high_scores(path: str, store: str, min_score: int, now: str) -> int:
                  AND NOT EXISTS (SELECT 1 FROM store_matches m WHERE m.store = s.store AND m.product_id = s.product_id)""",
             (store, store, min_score))]
         for r in rows:
-            con.execute("INSERT OR IGNORE INTO store_matches(store, product_id, article_id, status, updated) VALUES(?, ?, ?, 'confirmed', ?)",
+            con.execute("INSERT OR IGNORE INTO store_matches(store, product_id, article_id, status, updated) VALUES(?, ?, ?, 'auto', ?)",
                         (store, r["product_id"], r["article_id"], now))
             con.execute("UPDATE store_prices SET match = 'confirmed', score = 100 WHERE store = ? AND product_id = ? AND date = ?",
                         (store, r["product_id"], r["date"]))
@@ -1043,7 +1046,7 @@ def unconfirm_other_sizes(path: str, store: str) -> int:
                JOIN store_prices s ON s.store = m.store AND s.product_id = m.product_id AND s.article_id = m.article_id
                JOIN (SELECT product_id, MAX(date) AS d FROM store_prices WHERE store = ? GROUP BY product_id) x
                  ON x.product_id = s.product_id AND x.d = s.date
-               WHERE m.store = ? AND m.status = 'confirmed'""", (store, store))]
+               WHERE m.store = ? AND m.status IN ('confirmed', 'auto')""", (store, store))]
         # the latest check per product, decided before anything is removed (at most one row per product goes)
         loose = {r["product_id"]: r["date"] for r in con.execute(
             """SELECT s.product_id, s.date FROM store_prices s
@@ -1065,4 +1068,36 @@ def unconfirm_other_sizes(path: str, store: str) -> int:
             if pid not in handled:
                 con.execute("DELETE FROM store_prices WHERE store = ? AND product_id = ? AND date = ?", (store, pid, day))
                 out += 1
+    return out
+
+
+def recheck_confirmed(path: str, store: str, statuses: tuple[str, ...] = ("auto",)) -> int:
+    """Score confirmed matches again with the current rules (stored titles, no search). One that is no longer the same
+    product in the same size with the auto-confirm score loses its confirmation: it shows as likely again with its new
+    score, or is looked for again below the match score. Products with a rejected match (decided by you) are skipped."""
+    marks = ",".join("?" * len(statuses))
+    out = 0
+    with closing(_connect(path)) as con, con:
+        rows = [dict(r) for r in con.execute(
+            f"""SELECT m.product_id, m.article_id, s.date, s.title AS their_title, s.unit, p.title, p.brand, p.unit_size
+                FROM store_matches m JOIN products p ON p.product_id = m.product_id
+                JOIN store_prices s ON s.store = m.store AND s.product_id = m.product_id AND s.article_id = m.article_id
+                JOIN (SELECT product_id, MAX(date) AS d FROM store_prices WHERE store = ? GROUP BY product_id) x
+                  ON x.product_id = s.product_id AND x.d = s.date
+                WHERE m.store = ? AND m.status IN ({marks})
+                  AND NOT EXISTS (SELECT 1 FROM store_matches r WHERE r.store = m.store AND r.product_id = m.product_id
+                                  AND r.status = 'rejected')""", (store, store, *statuses))]
+        for r in rows:
+            new = match_score({"title": r["title"], "brand": r["brand"], "unit_size": r["unit_size"]},
+                              {"title": r["their_title"], "unit": r["unit"]})
+            if new["kind"] == "same" and new["score"] >= AUTO_CONFIRM_SCORE:
+                continue
+            con.execute("DELETE FROM store_matches WHERE store = ? AND product_id = ? AND article_id = ?",
+                        (store, r["product_id"], r["article_id"]))
+            if new["score"] < MATCH_MIN_SCORE:
+                con.execute("DELETE FROM store_prices WHERE store = ? AND product_id = ? AND date = ?", (store, r["product_id"], r["date"]))
+            else:
+                con.execute("UPDATE store_prices SET match = ?, score = ? WHERE store = ? AND product_id = ? AND date = ?",
+                            (new["kind"], new["score"], store, r["product_id"], r["date"]))
+            out += 1
     return out

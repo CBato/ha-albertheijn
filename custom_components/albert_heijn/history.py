@@ -236,6 +236,15 @@ class OrderHistory:
             await self._run(db.set_meta, {"unconfirmed_other_sizes": self.meta["unconfirmed_other_sizes"]})
             if n:
                 _LOGGER.info("Albert Heijn: %d Picnic matches in another size are looked for again", n)
+        if not self.meta.get("matching_v3"):
+            # once (0.29.0): matching rules from the export of 22 Oct. Score the stored matches again; confirmations
+            # without a rejection (until now all stored as 'confirmed', also the automatic ones) that no longer reach
+            # the auto-confirm score lose it. From now on automatic ones are stored as 'auto' and yours as 'confirmed'.
+            await self._run(db.rescore_name_matches, compare.PICNIC)
+            n = await self._run(db.recheck_confirmed, compare.PICNIC, ("auto", "confirmed"))
+            self.meta["matching_v3"] = _now()
+            await self._run(db.set_meta, {"matching_v3": self.meta["matching_v3"]})
+            _LOGGER.info("Albert Heijn: matching rules updated; %d confirmations no longer hold", n)
         if n := await self._run(db.confirm_high_scores, compare.PICNIC, AUTO_CONFIRM_SCORE, _now()):
             _LOGGER.info("Albert Heijn: %d Picnic matches with score %d+ confirmed", n, AUTO_CONFIRM_SCORE)
 
@@ -758,7 +767,7 @@ class OrderHistory:
                 # not good enough to count, but worth a look: confirm it by hand
                 guess = {k: best.get(k) for k in ("article_id", "title", "price", "unit", "image_url", "score", "kind")}
         if found and found.get("match") == "same" and found["score"] >= AUTO_CONFIRM_SCORE:
-            await self._run(db.add_confirmed_match, compare.PICNIC, pid, found["article_id"], _now())
+            await self._run(db.add_confirmed_match, compare.PICNIC, pid, found["article_id"], _now(), "auto")
             found.update(match="confirmed", score=100)
         await self._run(db.save_store_price, compare.PICNIC, pid, today, found, guess)
 

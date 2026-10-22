@@ -45,7 +45,47 @@ assert score(("AH Rucola slamelange", "AH", "75 g"), ("Picnic rucola melange", "
 assert score(("Bolletje Echte beschuit", "Bolletje", "13 stuks"), ("Bolletje beschuit", "13 stuks"))["score"] == 95
 assert score(("AH Volkoren brood", "AH", "800 g"), ("Picnic brood wit", "800 gram"))["score"] < s.MATCH_MIN_SCORE
 assert s.parse_size("1 stuk (ca. 800 gram)") == (800, "g") and s.parse_size("los per kilo") == (1000, "g")
-assert s.search_queries("AH Andijvie fijngesneden grootverpakking", "AH") == ["andijvie fijngesneden", "fijngesneden", "andijvie"]
+assert s.search_queries("AH Andijvie fijngesneden grootverpakking", "AH") == ["andijvie fijngesneden", "andijvie"]
+# store brand: the first word, not the longest ("toegevoegd")
+assert s.search_queries("AH Appelmoes 0% suiker toegevoegd", "AH")[1] == "appelmoes"
+
+# real cases from a match export (22 Oct 2026): should NOT match
+for mine, theirs in [
+    (("AH Appelsap", "AH", "1,5 l"), ("Picnic appel nectar", "1.5 liter")),            # sap is not nectar
+    (("AH Elstar appelsap", "AH", "1 l"), ("Elstar appels", "1,5 kilo")),               # juice is not apples
+    (("AH Goudse jong belegen 48+ plakken", "AH", "190 g"), ("Picnic goudse jong belegen 30+ plakken", "190 gram")),
+    (("Dodoni Griekse yoghurt 0% vet", "Dodoni", "500 g"), ("Dodoni Griekse yoghurt 5%", "500 gram")),
+    (("Holie's Chewy bar coconut chocolate", "Holie's", "105 g"), ("Holie's chewy bar double chocolate", "105 gram")),
+    (("AH Smeerkaas naturel 15+", "AH", "200 g"), ("Echte Smeerkaas 48+ naturel", "100 gram")),
+]:
+    assert score(mine, theirs)["score"] < s.MATCH_MIN_SCORE, (mine[0], score(mine, theirs))
+# should match, and these are so clearly the same that they are confirmed automatically (95)
+for mine, theirs in [
+    (("AH Paprika rood", "AH", "per stuk"), ("Rode paprika", "1 stuk")),                 # rood / rode
+    (("Van Gilse Witte basterdsuiker", "Van Gilse", "600 g"), ("Van Gilse basterdsuiker wit", "600 gram")),
+    (("Teisseire Zero tropical siroop", "Teisseire", "0,6 l"), ("Teisseire Siroop tropical 0%", "600 ml")),  # zero / 0%
+    (("Pukka Relax", "Pukka", "20 stuks"), ("Pukka relax thee", "20 koppen")),           # koppen = stuks, "thee"
+    (("Clipper Zen again organic infusion", "Clipper", "20 stuks"), ("Clipper bio zen again", "20 koppen")),
+    (("AH Pitloze witte druiven", "AH", "500 g"), ("Witte druiven", "500 gram")),
+    (("AH Luxe roerbak Provençaals", "AH", "400 g"), ("Picnic Provençaalse roerbakgroenten", "400 gram")),
+    (("AH Andijvie fijngesneden kleinverpakking", "AH", "250 g"), ("Picnic andijvie fijngesneden", "250 gram")),
+    (("AH Witte vrije uitloopeieren M", "AH", "6 stuks"), ("Picnic witte vrije uitloop eieren", "6 stuks M/L")),
+    (("Danio Romige kwark aardbei", "Danio", "450 g"), ("Danio aardbei kwark", "450 gram")),
+    (("Almhof Choco met echte slagroom original", "Almhof", "180 g"), ("Almhof choco met échte slagroom", "180 ml")),  # g ≈ ml
+    (("Mentos Gum White sweet mint", "Mentos Gum", "112.5 g"), ("Mentos White sweetmint", "112 gram • 75 stuks")),  # half the brand
+    (("De Zaanse Hoeve Roomboter ongezouten", "De Zaanse Hoeve", "250 g"), ("Picnic Ongezouten roomboter", "250 gram")),  # AH brand
+    (("Optimel Drinkyoghurt framboos", "Optimel", "1 l"), ("Optimel drinkyoghurt framboos 0%", "1 liter")),  # grade only there
+]:
+    assert score(mine, theirs) == {"score": 95, "kind": "same"}, (mine[0], score(mine, theirs))
+# likely (shown, not confirmed automatically): a brand with a shorter name there, "Original" = "Naturel"
+for mine, theirs in [
+    (("Actimel Drinkyoghurt aardbei", "Actimel", "8 x 100 ml"), ("Actimel aardbei", "8 x 100 ml")),
+    (("Jozo Naturel tafelzout", "Jozo", "125 g"), ("Jozo tafelzout", "125 gram")),
+    (("Pringles Original", "Pringles", "165 g"), ("Pringles Naturel", "165 gram")),
+]:
+    assert 60 <= score(mine, theirs)["score"] < 95, (mine[0], score(mine, theirs))
+# grams vs pieces stays "similar" without the heavy weight-vs-volume penalty
+assert score(("Unox Knaks", "Unox", "400 g"), ("Unox knaks", "11 stuks")) == {"score": 90, "kind": "similar"}
 assert s.search_queries("Bolletje Echte beschuit", "Bolletje") == ["bolletje beschuit", "beschuit"]
 assert s.search_queries("AH Biologisch Pompoen", "AH Biologisch") == ["bio pompoen", "pompoen"]
 assert s.search_query("AH Halfvolle melk 1 L", "AH") == "halfvolle melk"

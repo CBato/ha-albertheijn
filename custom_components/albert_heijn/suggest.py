@@ -251,7 +251,7 @@ def order_effective_prices(items: list[dict[str, Any]]) -> dict[int, float | Non
 
 # words that say nothing about which product you mean ("zet een pak melk op de lijst")
 _FILLER = {"de", "het", "een", "wat", "nog", "paar", "pak", "pakje", "pakken", "fles", "flessen", "zak", "zakje",
-           "ah", "albert", "heijn", "van", "en", "met"}
+           "ah", "albert", "heijn", "van", "en", "met", "the", "of", "and", "with", "voor", "in", "op"}
 
 
 def _plain(text: str) -> str:
@@ -262,10 +262,16 @@ def _plain(text: str) -> str:
 
 
 def _stem(word: str) -> str:
-    """Rough Dutch plural to singular, so "eieren" finds "ei" and "bananen" finds "banaan" (via "banan")."""
+    """Rough Dutch plural to singular, so "eieren" finds "ei" and "bananen" finds "banaan" (via "banan");
+    diminutives ("cakejes" -> "cake") and an inflected -e ("provencaalse" -> "provencaals") too."""
+    for suffix in ("tjes", "jes"):
+        if len(word) > len(suffix) + 3 and word.endswith(suffix):
+            return word[: -len(suffix)]
     for suffix in ("eren", "en", "s"):
         if len(word) > len(suffix) + 2 and word.endswith(suffix):
             return word[: -len(suffix)]
+    if len(word) > 5 and word.endswith("e"):
+        return word[:-1]
     return word
 
 
@@ -300,23 +306,37 @@ def match_products(products: list[dict[str, Any]], query: str, limit: int = 4) -
 # size units -> (factor, dimension): grams, millilitres, pieces
 _UNITS = {"kg": (1000, "g"), "kilo": (1000, "g"), "g": (1, "g"), "gr": (1, "g"), "gram": (1, "g"),
           "l": (1000, "ml"), "lt": (1000, "ml"), "ltr": (1000, "ml"), "liter": (1000, "ml"), "cl": (10, "ml"),
-          "ml": (1, "ml"), "st": (1, "st"), "stuk": (1, "st"), "stuks": (1, "st"), "stück": (1, "st")}
+          "ml": (1, "ml"), "st": (1, "st"), "stuk": (1, "st"), "stuks": (1, "st"), "stück": (1, "st"),
+          # counted things are pieces too ("20 koppen" thee = "20 stuks")
+          "koppen": (1, "st"), "cups": (1, "st"), "capsules": (1, "st"), "zakjes": (1, "st"), "tabletten": (1, "st"),
+          "rollen": (1, "st"), "blokjes": (1, "st"), "pakjes": (1, "st"), "wasbeurten": (1, "st")}
 _UNIT_RE = "|".join(sorted(_UNITS, key=len, reverse=True))
 _SIZE_WORDS = set(_UNITS) | {"x", "per", "ca", "circa", "stuk", "pak", "fles", "blik", "pot", "doos", "zak", "los", "kilo",
                               # packaging: the size says it already ("grootverpakking" 500 g vs 500 g)
                               "grootverpakking", "voordeelverpakking", "voordeelpak", "familieverpakking", "multipack",
-                              "verpakking", "navulverpakking", "navulling", "voordeel", "bulk", "xl", "xxl", "maxi", "mega"}
+                              "verpakking", "navulverpakking", "navulling", "voordeel", "bulk", "xl", "xxl", "maxi", "mega",
+                              "kleinverpakking", "m", "s", "pack", "schaal"}
 # words that say little about what the product is ("Bolletje Echte beschuit" = "Bolletje beschuit")
 _WEAK = {"echte", "echt", "original", "originele", "origineel", "classic", "klassiek", "klassieke", "lekker", "heerlijke",
-         "verse", "vers", "huismerk", "nieuw", "new"}
+         "verse", "vers", "huismerk", "nieuw", "new", "luxe", "gekoeld", "pitloze", "pitloos", "romige", "romig",
+         "thee", "tea", "infusion", "infusie", "vruchtensap", "patent", "kaas", "vet", "classico", "chips"}
 # parts of a compound word that change the product ("half" + "volle" is not "volle")
 _QUALIFIERS = {"half", "mager", "extra", "super", "light", "licht", "dubbel", "volkoren", "wit", "witte", "bruin", "bruine",
                "zoet", "zuur", "zout", "ongezouten", "pittig", "mild", "jong", "oud", "belegen", "zero", "suikervrij", "vol"}
+# what makes a different product when it is glued to a word ("appel" + "sap" is not "appel")
+_PRODUCT_RESTS = {"sap", "nectar", "moes", "stroop", "siroop", "puree", "saus", "olie", "azijn", "jam", "drank", "melk",
+                  "yoghurt", "kwark", "vla", "ijs", "thee", "soep", "chips", "taart", "koek", "koeken"}
 # the same word written differently
 _SYNONYMS = {"biologisch": "bio", "biologische": "bio", "organic": "bio", "eko": "bio",
-             "hagel": "hagelslag", "chocoladehagel": "hagelslag", "chocoladehagelslag": "hagelslag"}
+             "hagel": "hagelslag", "chocoladehagel": "hagelslag", "chocoladehagelslag": "hagelslag",
+             "rode": "rood", "groene": "groen", "gele": "geel", "witte": "wit", "zwarte": "zwart", "oranje": "oranje",
+             "zero": "0%"}
+# numbers that make a different product: fat or sugar ("48+" vs "30+", "0%" vs "5%")
+_GRADE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(%|\+)")
 # store brands: different at every store, so the brand doesn't have to match (the product does)
 _HOUSE = {"ah", "albert", "heijn", "picnic", "excellent", "terra", "basic", "huismerk", "g&g"}
+# AH's own brands without "AH" in the name
+_HOUSE_BRANDS = {"de zaanse hoeve", "zaanse hoeve", "streeckgenoten", "care", "beregoede", "g woon", "smaakt"}
 MATCH_MIN_SCORE = 60  # below this a name match is not shown
 AUTO_CONFIRM_SCORE = 95  # a name match this good counts as confirmed (you can still reject it); only the same size
 SIZE_MAX_SCORE = 85  # same product in another size: at most this (so never confirmed automatically)
@@ -356,13 +376,19 @@ def _keep(word: str) -> bool:
     return word not in _SIZE_WORDS and word not in _FILLER and word not in _HOUSE and word not in _WEAK and not any(c.isdigit() for c in word)
 
 
+def _grades(text: str) -> set[str]:
+    """Percentages and "plus" grades in a name: "Goudse jong belegen 48+" -> {"48+"}, "0% vet" -> {"0%"}."""
+    return {f"{n.replace(',', '.')}{sign}" for n, sign in _GRADE_RE.findall((text or "").lower())}
+
+
 def _words(text: str) -> set[str]:
-    return {_stem(_SYNONYMS.get(w, w)) for w in _plain(text).split() if _keep(w)}
+    words = {_stem(_SYNONYMS.get(w, w)) for w in _plain(text).split() if _keep(w)}
+    return {w for w in words if w != "0%"} | _grades(text) | ({"0%"} if "zero" in _plain(text).split() else set())
 
 
 def is_house_brand(brand: str | None) -> bool:
     words = _plain(brand or "").split()
-    return not words or words[0] in _HOUSE
+    return not words or words[0] in _HOUSE or " ".join(words) in _HOUSE_BRANDS
 
 
 def search_query(title: str, brand: str | None = None) -> str:
@@ -371,16 +397,18 @@ def search_query(title: str, brand: str | None = None) -> str:
 
 
 def search_queries(title: str, brand: str | None = None) -> list[str]:
-    """Searches to try, from precise to broad: the whole name; for a brand: brand + the longest word; the first word
-    ("andijvie fijngesneden" -> "andijvie"). Store search engines often find nothing for a long exact name."""
+    """Searches to try, from precise to broad: the whole name; then for a brand: brand + its longest word, for a store
+    brand: the first word ("andijvie fijngesneden" -> "andijvie"). Store search engines often find nothing for a long
+    exact name."""
     full = search_query(title, brand)
     words = full.split()
     brand_words = [w for w in _plain(brand or "").split() if _keep(w)] if not is_house_brand(brand) else []
     rest = [w for w in words if w not in brand_words and w not in _SYNONYMS.values()]
     out = [full]
     if rest:
-        longest = max(rest, key=len)
-        out.append(" ".join(brand_words + [longest]) if brand_words else longest)
+        # a brand: brand + its most telling word; a store brand: the first word, usually the product itself
+        # ("appelmoes 0% suiker toegevoegd" -> "appelmoes", not "toegevoegd")
+        out.append(" ".join(brand_words + [max(rest, key=len)]) if brand_words else rest[0])
         out.append(rest[0])
     return [q for i, q in enumerate(out) if q and q not in out[:i]]
 
@@ -395,52 +423,81 @@ def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str,
     """
     branded = not is_house_brand(product.get("brand"))
     brand_words = _words(product.get("brand") or "") if branded else set()
-    # the brand is checked on its own; the product words (flavour, kind) must match without it
-    mine = _words(product.get("title") or "") - brand_words
-    theirs = _words(candidate.get("title") or "") - brand_words
-    if not mine or not theirs:
-        return {"score": 0, "kind": "similar"}
+    their_all = _words(candidate.get("title") or "")
+    # the brand is there when at least half of its words are ("Mentos Gum" / "Mentos")
+    brand_ok = not branded or bool(brand_words) and len(brand_words & their_all) * 2 >= len(brand_words)
+    # the brand is checked on its own; the product words (flavour, kind) must match without it. AH's own brands without
+    # "AH" ("De Zaanse Hoeve") leave the comparison too (but "AH Biologisch" keeps "bio": that must match)
+    own = _words(product.get("brand") or "") if _plain(product.get("brand") or "") in _HOUSE_BRANDS else set()
+    mine = _words(product.get("title") or "") - brand_words - own
+    theirs = _words(candidate.get("title") or "") - brand_words - own
+    size_mine = parse_size(product.get("unit_size")) or parse_size(product.get("title"))
+    size_theirs = parse_size(candidate.get("unit")) or parse_size(candidate.get("title"))
+    # grams and millilitres of about the same amount count as the same size (180 g vs 180 ml choco)
+    if size_mine and size_theirs and {size_mine[1], size_theirs[1]} == {"g", "ml"} and             abs(size_mine[0] - size_theirs[0]) <= 0.05 * max(size_mine[0], size_theirs[0]):
+        size_theirs = (size_theirs[0], size_mine[1])
+    # pieces against a weight that also says how many ("4 stuks" / "248 gram • 4 x 62 gram")
+    if size_mine and size_theirs and size_mine[1] == "st" and size_theirs[1] != "st":
+        if m := re.search(r"(\d+)\s*x\s*\d", (candidate.get("unit") or "").lower()):
+            size_theirs = (float(m[1]), "st")
+    same_dim = bool(size_mine and size_theirs and size_mine[1] == size_theirs[1])
+    ratio = max(size_mine[0], size_theirs[0]) / max(min(size_mine[0], size_theirs[0]), 0.001) if same_dim else None
 
     def found(word: str, others: set[str]) -> bool:
         """A word also counts when it is part of a longer word, either way ("scharrel" / "scharreleieren",
-        "slamelange" / "melange")."""
+        "slamelange" / "melange"), unless the rest makes another product ("half"-volle, appel-"sap")."""
         def inside(short: str, long: str) -> bool:
             if len(short) < 3 or short not in long:
                 return False
             rest = long.replace(short, "", 1)
-            return len(rest) < 2 or rest not in _QUALIFIERS
+            return len(rest) < 2 or (rest not in _QUALIFIERS and rest not in _PRODUCT_RESTS)
 
         return word in others or any(inside(word, o) or (len(o) >= 4 and inside(o, word)) for o in others)
 
     def compact(text: str) -> str:
         return "".join(_SYNONYMS.get(w, w) for w in _plain(text).split() if _keep(w))
 
-    if compact(product.get("title") or "").replace(compact(product.get("brand") or ""), "") ==             compact(candidate.get("title") or "").replace(compact(product.get("brand") or ""), ""):
-        hits, extra = len(mine), 0  # same words, only written apart or together ("scharrel eieren" / "scharreleieren")
+    conflict = False
+    if not mine:
+        # nothing telling besides the brand ("Pringles Original"): the brand and the size decide
+        score = 85 if branded and brand_ok and theirs <= {"naturel", "0%"} else 0
+        hits = extra = 0
     else:
-        hits = sum(found(w, theirs) for w in mine)
-        extra = sum(not found(w, mine) for w in theirs)
-    # your words found there, minus every word they have extra ("rode kool" vs "rode kool met appel")
-    score = 100 * hits / len(mine) - EXTRA_WORD_PENALTY * extra
-    if branded:
-        # a branded product must be the same brand there
-        if brand_words and brand_words <= _words(candidate.get("title") or ""):
-            score += 5
+        if compact(product.get("title") or "").replace(compact(product.get("brand") or ""), "") == \
+                compact(candidate.get("title") or "").replace(compact(product.get("brand") or ""), "") \
+                and _grades(product.get("title")) == _grades(candidate.get("title")):
+            hits, extra = len(mine), 0  # same words, only written apart or together ("scharrel eieren" / "scharreleieren")
         else:
-            score = min(score, 50)
-    size_mine = parse_size(product.get("unit_size")) or parse_size(product.get("title"))
-    size_theirs = parse_size(candidate.get("unit")) or parse_size(candidate.get("title"))
-    if size_mine and size_theirs and size_mine[1] == size_theirs[1]:
-        ratio = max(size_mine[0], size_theirs[0]) / max(min(size_mine[0], size_theirs[0]), 0.001)
-        if ratio <= 1.03:
-            kind = "same"
-        else:
-            # another size: never as good as the same size, and worse the bigger the difference (355 vs 700 g: ~75)
-            kind = "size"
-            score = min(score - 15 - 10 * math.log2(ratio), SIZE_MAX_SCORE)
+            hits = sum(found(w, theirs) for w in mine)
+            # a grade only they mention ("0%" Optimel) is no difference; a conflicting one is handled below
+            extra = sum(not found(w, mine) for w in theirs if not _GRADE_RE.fullmatch(w))
+        # your words found there, minus every word they have extra ("rode kool" vs "rode kool met appel"), and more when a
+        # word of yours is swapped for another one: another flavour ("coconut chocolate" vs "double chocolate")
+        missing = len(mine) - hits
+        score = 100 * hits / len(mine) - EXTRA_WORD_PENALTY * extra - EXTRA_WORD_PENALTY * min(missing, extra)
+        if branded:
+            # a branded product must be the same brand there
+            score = score + 5 if brand_ok else min(score, 50)
+        # different fat or sugar grade: another product ("48+" vs "30+", "0%" vs "5%")
+        grades_mine, grades_theirs = _grades(product.get("title")) | ({"0%"} if "0%" in mine else set()),             _grades(candidate.get("title")) | ({"0%"} if "0%" in theirs else set())
+        conflict = bool(grades_mine and grades_theirs and not grades_mine & grades_theirs)
+        if conflict:
+            score = min(score, 40)
+    if same_dim and ratio <= 1.03:
+        kind = "same"
+        # the other store just leaves words out ("Actimel Drinkyoghurt aardbei" / "Actimel aardbei"): same brand, same
+        # size, nothing extra and at least half your words: very likely the same. Not for store brands: there a left-out
+        # word is often the variant ("pindakaas met stukjes" / "pindakaas")
+        if branded and brand_ok and mine and not extra and not conflict and hits / len(mine) >= 0.5:
+            score = max(score, 85)
+    elif same_dim:
+        # another size: never as good as the same size, and worse the bigger the difference (355 vs 700 g: ~80)
+        kind = "size"
+        score = min(score - 15 - 10 * math.log2(ratio), SIZE_MAX_SCORE)
     else:
         kind = "similar"
-        score -= 15
+        # weight against volume (apple juice in litres vs apples in kilos) says more than pieces vs grams
+        score -= 25 if size_mine and size_theirs and {size_mine[1], size_theirs[1]} == {"g", "ml"} else 15
     return {"score": max(0, min(95, round(score))), "kind": kind}  # 100 = same barcode or confirmed
 
 

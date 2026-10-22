@@ -194,6 +194,13 @@ async def main():
     assert client is None and "niet geladen" in why
     del entry.state, entry.runtime_data
 
+    # confirmations are scored again with the current rules: an automatic one that no longer reaches 95 loses it,
+    # one you decided (with a rejection) stays
+    await h._run(db.add_confirmed_match, "picnic", 2, "s2", now)  # Calvé 650 g for your 450 g: 'size', 85
+    assert await h._run(db.recheck_confirmed, "picnic") == 1
+    assert (await h._run(db.store_matches, "picnic")).get(2, {}).get("confirmed") is None
+    assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["match"] == "size"
+
     # without the Picnic integration: skipped, no error
     Hass.config_entries = ConfigEntries()
     n = FakePicnic.calls
