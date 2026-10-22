@@ -51,6 +51,7 @@ DETAILS_MAX = 150  # per sync (the first time spread over a few nights)
 GTIN_EVERY_DAYS = 7  # an EAN AH doesn't give is asked again at most once a week
 GTIN_MAX = 150  # per sync
 STORE_EVERY_DAYS = 7  # prices at other stores: weekly
+STORE_RETRY_DAYS = 28  # a product not found at a store is looked for again after 4 weeks
 STORE_MAX = 150  # per sync
 STORE_PAUSE = 1.0  # seconds between requests to another store
 STORE_TIMEOUT = 20  # seconds; a slow or hanging store stops this round instead of holding the sync
@@ -703,6 +704,11 @@ class OrderHistory:
         if m["confirmed"]:
             if found := await job(compare.picnic_article, client, m["confirmed"]):
                 found.update(match="confirmed", score=100)
+        # matched before: only the new price of that article (search again only when it is gone)
+        last = product.get("last_article")
+        if not found and last and last not in m["rejected"] and product.get("last_match") != "confirmed":
+            if found := await job(compare.picnic_article, client, last):
+                found.update(match=product.get("last_match") or "ean", score=product.get("last_score") or 100)
         for gtin in product.get("gtins") or ([product["gtin"]] if product.get("gtin") else []):
             if found:
                 break
@@ -724,8 +730,11 @@ class OrderHistory:
         await self._run(db.save_store_price, compare.PICNIC, pid, today, found)
 
     async def _fetch_picnic(self, today: str, now: str) -> str | None:
-        """Weekly: every bought product at Picnic (barcode, else name and size). Returns an error text, or None."""
-        due = await self._run(db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), self._max or STORE_MAX, self._retry)
+        """Weekly Picnic prices. Matched products: only the price of their article (1 request). New products: barcode,
+        else name and size. Not found: looked for again after STORE_RETRY_DAYS (or now with retry_not_found).
+        Returns an error text, or None."""
+        due = await self._run(db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), self._max or STORE_MAX, self._retry,
+                             (date.today() - timedelta(days=STORE_RETRY_DAYS - 1)).isoformat())
         if not due:
             return None
         client, err = await self._picnic()

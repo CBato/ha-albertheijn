@@ -848,21 +848,34 @@ def save_gtins(path: str, product_id: int, gtins: list[str], now: str) -> None:
                     (",".join(gtins), now, product_id))
 
 
-def store_due(path: str, store: str, checked_before: str, limit: int, retry_not_found: bool = False) -> list[dict[str, Any]]:
-    """Bought products not checked at a store since checked_before: product_id, gtin (first, or None), title, brand,
-    unit_size. With a title, so products without an EAN can be found by name. retry_not_found: also products that
-    were checked but not found (e.g. after the matching got better)."""
-    found_only = "AND s.article_id IS NOT NULL" if retry_not_found else ""
+def store_due(path: str, store: str, checked_before: str, limit: int, retry_not_found: bool = False,
+              not_found_before: str | None = None) -> list[dict[str, Any]]:
+    """Bought products to check at a store: product_id, gtins (up to 3), title, brand, unit_size, and the last check
+    (last_date, last_article, last_match, last_score).
+
+    Due: never checked; matched and not checked since checked_before (weekly price); not found and last looked for
+    before not_found_before (default checked_before), or any time with retry_not_found.
+    """
     with closing(_connect(path)) as con:
         return [
             {"product_id": r["product_id"], "gtins": [g for g in (r["gtin"] or "").split(",") if g][:3], "title": r["title"],
-             "brand": r["brand"], "unit_size": r["unit_size"]}
+             "brand": r["brand"], "unit_size": r["unit_size"], "last_date": r["last_date"], "last_article": r["last_article"],
+             "last_match": r["last_match"], "last_score": r["last_score"]}
             for r in con.execute(
-                f"""SELECT p.product_id, p.gtin, p.title, p.brand, p.unit_size FROM products p
-                    JOIN ({_bought_ids_sql()}) ids ON ids.id = p.product_id
+                f"""SELECT p.product_id, p.gtin, p.title, p.brand, p.unit_size,
+                           l.date AS last_date, l.article_id AS last_article, l.match AS last_match, l.score AS last_score
+                    FROM products p JOIN ({_bought_ids_sql()}) ids ON ids.id = p.product_id
+                    LEFT JOIN (SELECT s.product_id, s.date, s.article_id, s.match, s.score FROM store_prices s
+                               JOIN (SELECT product_id, MAX(date) AS d FROM store_prices WHERE store = ? GROUP BY product_id) x
+                                 ON x.product_id = s.product_id AND x.d = s.date
+                               WHERE s.store = ?) l ON l.product_id = p.product_id
                     WHERE ((p.gtin IS NOT NULL AND p.gtin != '') OR (p.title IS NOT NULL AND p.title != '' AND p.title NOT LIKE 'Product %'))
-                      AND NOT EXISTS (SELECT 1 FROM store_prices s WHERE s.store = ? AND s.product_id = p.product_id AND s.date >= ? {found_only})
-                    LIMIT ?""", (store, checked_before, limit))
+                      AND (l.date IS NULL
+                           OR (l.article_id IS NOT NULL AND l.date < ?)
+                           OR (l.article_id IS NULL AND (? OR l.date < ?)))
+                    ORDER BY l.date IS NOT NULL, l.date
+                    LIMIT ?""",
+                (store, store, checked_before, 1 if retry_not_found else 0, not_found_before or checked_before, limit))
         ]
 
 

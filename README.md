@@ -124,7 +124,7 @@ Orders (from the original integration): "wat zit er in mijn bestelling", "wannee
 | Prices of everything you buy | Once a week (and on Monday before `fill_list`) | Whole list (that is the measurement) |
 | Bonus this week and next week | Once a day (the first sync of the day) | Per week |
 | EAN (barcode) of the products you buy | Every sync, for products without one | Each product at most once a week while AH doesn't give one |
-| Prices at Picnic (with the Picnic integration) | Weekly per product | Only products with an EAN, each once a week |
+| Prices at Picnic (with the Picnic integration) | Weekly per product | Matched: only the price of the matched article (1 request). New: barcode, else name. Not found: again after 4 weeks |
 | Missing product details (title, category, image) | Every sync, for products that lack them | Each product at most once a week; products AH no longer sells online show the name from the till receipt |
 
 After a restart and after a delivery only a light sync runs (orders, receipts, bonus), so Home Assistant stays

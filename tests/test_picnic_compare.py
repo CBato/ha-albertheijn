@@ -1,6 +1,7 @@
 """Offline test: Picnic matching (barcode, else name and size), confirm/reject, and the list compared."""
 
 import asyncio
+from datetime import date, timedelta
 import os
 from types import SimpleNamespace as NS
 
@@ -51,12 +52,14 @@ class FakeApi:
 
 class FakePicnic:
     calls = 0
+    article_calls = 0
 
     def get_article_by_gtin(self, gtin):
         FakePicnic.calls += 1
         return ARTICLES.get(BY_EAN.get(gtin))
 
     def get_article(self, article_id):
+        FakePicnic.article_calls += 1
         return ARTICLES.get(article_id)
 
     def search(self, query):
@@ -117,6 +120,15 @@ async def main():
 
     # product page shows it
     assert (await h._run(db.product_history, 3))["stores"]["picnic"]["article_id"] == "s4"
+
+    # a week later: matched products only get the price of their article, nothing is searched
+    n, a = FakePicnic.calls, FakePicnic.article_calls
+    next_week = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
+    history.date = type("D", (date,), {"today": staticmethod(lambda: date.fromisoformat(next_week))})
+    assert await h._fetch_picnic(next_week, now) is None
+    history.date = date
+    assert FakePicnic.calls == n and FakePicnic.article_calls == a + 3, (FakePicnic.calls - n, FakePicnic.article_calls - a)
+    assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["match"] == "size"  # kind and score kept
 
     # without the Picnic integration: skipped, no error
     Hass.config_entries = ConfigEntries()
