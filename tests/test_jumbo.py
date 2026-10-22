@@ -131,6 +131,18 @@ async def main():
     assert got[1]["match"] == "ean" and got[1]["article_id"] == "216435STK", got[1]
     assert got[2]["article_id"] == "100PAP" and got[2]["match"] == "auto", got[2]  # same, 95: confirmed automatically
     assert got[3]["article_id"] == "539042PAK", got[3]  # the beer, not the 0.0
+    # a brand matched for sure lends its barcode (for Picnic); a store brand never
+    prod = lambda pid: h._run(db.product_for_store, pid)  # noqa: E731
+    assert (await prod(3))["gtins"] == ["8712000025649"], await prod(3)
+    assert (await prod(2))["gtins"] == []
+    # a store that didn't find it looks again in the next round, now on the barcode
+    await h._run(db.save_store_price, "picnic", 5, today, None)
+    await h._run(db.save_order, 12, "2026-10-18", "delivered", [{"product_id": 5, "title": "Lay's Paprika", "brand": "Lay's",
+                 "unit_size": "225 g", "quantity": 1, "price": 2.5}], now)
+    assert await h._run(db.borrow_gtin, 5, "8710398000001", "jumbo")
+    assert not await h._run(db.borrow_gtin, 5, "08710398000001", "jumbo")  # the same code: nothing new
+    assert 5 in {p["product_id"] for p in await h._run(db.store_due, "picnic", today, 100)}
+    assert (await h._run(db.store_counts))["gtin_borrowed"] == 2  # the beer and the crisps
 
     # the list compared, per store
     c = await h.async_compare_list()
@@ -164,6 +176,9 @@ async def main():
     assert res["store"] == "jumbo" and res["items"][0]["article_id"] == "216435STK" and res["items"][0]["score"] >= 90, res
     m = await h.async_confirm_match(1, "216435STK", False, "jumbo")  # reject: the next best (another size)
     assert m["article_id"] == "216438STK" and m["match"] == "size", m
+    # rejecting the beer at Jumbo also forgets the barcode borrowed from it
+    await h.async_confirm_match(3, "539042PAK", False, "jumbo")
+    assert "8712000025649" not in (await prod(3))["gtins"], await prod(3)
 
     # Jumbo down: three errors in a row pause Jumbo, Picnic and AH go on
     FakeSession.down = True

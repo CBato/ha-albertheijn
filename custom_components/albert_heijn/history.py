@@ -28,6 +28,7 @@ from .suggest import (
     match_score,
     compute_suggestions,
     effective_price,
+    is_house_brand,
     eur,
     parse_promo,
     parse_size,
@@ -868,7 +869,7 @@ class OrderHistory:
                 if best_match(product, list(candidates.values()), m["rejected"]):
                     break
             if best := best_match(product, list(candidates.values()), m["rejected"]):
-                found = {k: best.get(k) for k in ("article_id", "title", "price", "original_price", "unit", "image_url")}
+                found = {k: best.get(k) for k in ("article_id", "title", "price", "original_price", "unit", "image_url", "ean")}
                 found.update(match=best["kind"], score=best["score"])
             elif best := best_match(product, list(candidates.values()), m["rejected"], GUESS_MIN_SCORE):
                 # not good enough to count, but worth a look: confirm it by hand
@@ -876,6 +877,11 @@ class OrderHistory:
         if found and found.get("match") == "same" and found["score"] >= AUTO_CONFIRM_SCORE:
             await self._run(db.add_confirmed_match, store, pid, found["article_id"], _now(), "auto")
             found.update(match="auto", score=100)
+        # a brand matched for sure (by you or automatically): its barcode is the same everywhere, so keep the EAN this
+        # store gives; the other stores then find it on barcode. Not for store brands (every store its own barcode).
+        if (found and found.get("ean") and found.get("match") in ("auto", "confirmed")
+                and not is_house_brand(product.get("brand"))):
+            await self._run(db.borrow_gtin, pid, str(found["ean"]), store)
         await self._run(db.save_store_price, store, pid, today, found, guess)
 
     async def _fetch_store(self, store: str, today: str) -> str | None:
@@ -932,6 +938,8 @@ class OrderHistory:
         """Confirm or reject the product of a store matched to one of yours, and look again right away
         (after a rejection: the next best). Returns what is matched now."""
         await self._run(db.set_store_match, store, product_id, article_id, confirmed, _now())
+        if not confirmed:
+            await self._run(db.drop_borrowed_gtins, product_id, store)
         client, _err = await self._client(store)
         product = await self._run(db.product_for_store, product_id)
         if client and product:

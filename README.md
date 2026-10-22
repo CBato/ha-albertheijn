@@ -103,7 +103,10 @@ brand. Grades must agree ("48+" / "30+", "0%" / "5%": at most 40). Words that sa
 the normal one; colours, "zero"/"0%" and "bio"/"biologisch" are the
 same word; "koppen", "cups" and "capsules" count as pieces. The rules were tuned on a real export of matches;
 the examples are in `tests/test_store_match.py`.
-Other flavours or variants (paprika vs naturel, regular vs zero) score below 60 and are not shown. A barcode often
+Other flavours or variants (paprika vs naturel, regular vs zero) score below 60 and are not shown. A brand matched for sure at one store (confirmed by you, or automatically) lends the EAN that store gives (Jumbo
+does) to your product: a brand has the same barcode everywhere, so the other stores then find it on barcode, and a
+store that didn't find it looks again in the next round. Never for store brands (every store has its own barcode);
+rejecting the match removes the borrowed EAN again (`products.gtin_borrowed`). A barcode often
 differs per pack size and sometimes per country label (a German Nutella jar), which is why the name match exists.
 
 `compare_list` totals per store (`by_store`): **sure** (barcode or confirmed) and **likely** (all matches, other

@@ -96,7 +96,7 @@ async def main():
     assert calve["image_url"] == "https://storefront-prod.nl.picnicinternational.com/static/images/img2/small.png", calve
     assert melk["article_id"] == "s3" and melk["match"] == "same", melk  # store brand vs store brand
     counts = await h._run(db.store_counts)
-    assert counts == {"gtin_known": 2, "picnic_matched": 3}, counts
+    assert counts == {"gtin_known": 2, "gtin_borrowed": 0, "picnic_matched": 3}, counts
 
     c = await h.async_compare_list()
     rows = {r["product_id"]: r for r in c["items"]}

@@ -197,4 +197,5 @@ def jumbo_article(p: dict[str, Any] | None) -> dict[str, Any] | None:
         "original_price": _euro(price.get("price")) if promo else None,
         "unit": p.get("subtitle"),
         "image_url": p.get("image"),
+        "ean": p.get("ean"),
     }

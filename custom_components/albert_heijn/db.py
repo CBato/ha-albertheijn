@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS products (
     updated TEXT,
     details_tried TEXT,             -- last time missing details were looked up at AH (at most weekly)
     gtin TEXT,                      -- EAN/GTIN barcode(s), comma separated
-    gtin_tried TEXT                 -- last time the EAN was looked up at AH (at most weekly while unknown)
+    gtin_tried TEXT,                -- last time the EAN was looked up at AH (at most weekly while unknown)
+    gtin_borrowed TEXT              -- EANs taken from another store's sure match of a brand ("jumbo:871..."), comma separated
 );
 CREATE TABLE IF NOT EXISTS store_prices (
     store TEXT NOT NULL,            -- 'picnic'
@@ -171,7 +172,7 @@ def init(path: str) -> None:
         if "effective" not in cols:
             con.execute("ALTER TABLE prices ADD COLUMN effective REAL")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(products)")}
-        for col in ("details_tried", "gtin", "gtin_tried"):
+        for col in ("details_tried", "gtin", "gtin_tried", "gtin_borrowed"):
             if col not in cols:
                 con.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
         cols = {r["name"] for r in con.execute("PRAGMA table_info(store_prices)")}
@@ -879,6 +880,37 @@ def to_learn(path: str, product_ids: list[int], stores: list[str]) -> dict[str, 
     return out
 
 
+def borrow_gtin(path: str, product_id: int, gtin: str, store: str) -> bool:
+    """Remember the EAN of a brand product found at another store with a sure match (AH didn't give one, or another
+    one): a brand has the same barcode everywhere, so the next store can find it on barcode. Returns whether it is new."""
+    with closing(_connect(path)) as con, con:
+        r = con.execute("SELECT gtin, gtin_borrowed FROM products WHERE product_id = ?", (product_id,)).fetchone()
+        if not r:
+            return False
+        known = [g for g in (r["gtin"] or "").split(",") if g]
+        if any(g.lstrip("0") == gtin.lstrip("0") for g in known):
+            return False
+        borrowed = [b for b in (r["gtin_borrowed"] or "").split(",") if b] + [f"{store}:{gtin}"]
+        con.execute("UPDATE products SET gtin = ?, gtin_borrowed = ? WHERE product_id = ?",
+                    (",".join(known + [gtin]), ",".join(borrowed), product_id))
+        # stores that didn't find it: look again in the next round (now on barcode) instead of after 4 weeks
+        con.execute("DELETE FROM store_prices WHERE product_id = ? AND store != ? AND article_id IS NULL", (product_id, store))
+        return True
+
+
+def drop_borrowed_gtins(path: str, product_id: int, store: str) -> None:
+    """A match at a store was rejected: forget the EANs taken from it."""
+    with closing(_connect(path)) as con, con:
+        r = con.execute("SELECT gtin, gtin_borrowed FROM products WHERE product_id = ?", (product_id,)).fetchone()
+        if not r or not r["gtin_borrowed"]:
+            return
+        mine = [b for b in r["gtin_borrowed"].split(",") if b.startswith(store + ":")]
+        drop = {b.split(":", 1)[1] for b in mine}
+        keep = [b for b in r["gtin_borrowed"].split(",") if b and b not in mine]
+        con.execute("UPDATE products SET gtin = ?, gtin_borrowed = ? WHERE product_id = ?",
+                    (",".join(g for g in (r["gtin"] or "").split(",") if g and g not in drop), ",".join(keep) or None, product_id))
+
+
 def store_due(path: str, store: str, checked_before: str, limit: int, retry_not_found: bool = False,
               not_found_before: str | None = None) -> list[dict[str, Any]]:
     """Bought products to check at a store: product_id, gtins (up to 3), title, brand, unit_size, and the last check
@@ -926,7 +958,9 @@ def save_store_price(path: str, store: str, product_id: int, day: str, found: di
 
 def store_counts(path: str) -> dict[str, int]:
     with closing(_connect(path)) as con:
-        out = {"gtin_known": con.execute("SELECT COUNT(*) FROM products WHERE gtin IS NOT NULL AND gtin != ''").fetchone()[0]}
+        out = {"gtin_known": con.execute("SELECT COUNT(*) FROM products WHERE gtin IS NOT NULL AND gtin != ''").fetchone()[0],
+               "gtin_borrowed": con.execute(
+                   "SELECT COUNT(*) FROM products WHERE gtin_borrowed IS NOT NULL AND gtin_borrowed != ''").fetchone()[0]}
         for r in con.execute("SELECT store, COUNT(DISTINCT product_id) AS n FROM store_prices WHERE article_id IS NOT NULL GROUP BY store"):
             out[f"{r['store']}_matched"] = r["n"]
         return out
