@@ -850,11 +850,11 @@ def save_gtins(path: str, product_id: int, gtins: list[str], now: str) -> None:
                     (",".join(gtins), now, product_id))
 
 
-def to_learn(path: str, product_ids: list[int], store: str | None) -> dict[str, list[int]]:
+def to_learn(path: str, product_ids: list[int], stores: list[str]) -> dict[str, Any]:
     """Of these products (on your list or opened in the app, maybe never bought): which still need their details and
-    AH price ("details"), their EAN ("gtin") and a check at the other store ("store"; None = no other store). Each is
-    tried once; after that the normal weekly rounds take over (for products you bought)."""
-    out: dict[str, list[int]] = {"details": [], "gtin": [], "store": []}
+    AH price ("details"), their EAN ("gtin") and a check per other store ("stores": {store: [ids]}). Each is tried
+    once; after that the normal weekly rounds take over (for products you bought)."""
+    out: dict[str, Any] = {"details": [], "gtin": [], "stores": {s: [] for s in stores}}
     ids = list(dict.fromkeys(int(i) for i in product_ids if i))
     if not ids:
         return out
@@ -862,9 +862,10 @@ def to_learn(path: str, product_ids: list[int], store: str | None) -> dict[str, 
     with closing(_connect(path)) as con:
         rows = {r["product_id"]: r for r in con.execute(
             f"""SELECT p.product_id, p.title, p.details_tried, p.gtin, p.gtin_tried,
-                       (SELECT COUNT(*) FROM prices x WHERE x.product_id = p.product_id) AS prices,
-                       (SELECT COUNT(*) FROM store_prices s WHERE s.product_id = p.product_id AND s.store = ?) AS checks
-                FROM products p WHERE p.product_id IN ({marks})""", [store or "", *ids])}
+                       (SELECT COUNT(*) FROM prices x WHERE x.product_id = p.product_id) AS prices
+                FROM products p WHERE p.product_id IN ({marks})""", ids)}
+        checked = {(r["store"], r["product_id"]) for r in con.execute(
+            f"SELECT DISTINCT store, product_id FROM store_prices WHERE product_id IN ({marks})", ids)}
     for pid in ids:
         r = rows.get(pid)
         if not r or (not r["prices"] and not r["details_tried"]) or (
@@ -872,8 +873,9 @@ def to_learn(path: str, product_ids: list[int], store: str | None) -> dict[str, 
             out["details"].append(pid)
         if not r or (not r["gtin"] and not r["gtin_tried"]):
             out["gtin"].append(pid)
-        if store and (not r or not r["checks"]):
-            out["store"].append(pid)
+        for store in stores:
+            if (store, pid) not in checked:
+                out["stores"][store].append(pid)
     return out
 
 

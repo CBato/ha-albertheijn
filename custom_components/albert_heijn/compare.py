@@ -1,17 +1,28 @@
-"""Prices at other supermarkets, matched on EAN (barcode).
+"""Prices at other supermarkets, matched on EAN (barcode), else on name and size.
+
+Every store is used through the same small interface (PicnicStore, JumboStore): search(query), article(id) and
+lookup(gtin), each returning article_id, title, price and original_price (euro), unit and image_url.
 
 Picnic: through the official Picnic integration of Home Assistant. Its own client (connection) is used, so there is
 one login token: Picnic can hand out a new token with any answer, and the integration stores it. Nothing to configure
 here; without that integration (or while it is not loaded) the comparison is simply skipped.
 The Picnic client (python-picnic-api2, installed by Home Assistant for its Picnic integration) is blocking:
-call these functions in the executor.
+call these functions in the executor (PicnicStore does that).
+
+Jumbo: no account needed. The GraphQL API that jumbo.com itself uses (not documented, no official API); it wants the
+client name and version of the website, read from its home page. If Jumbo changes it, the checks fail and Jumbo is
+paused like any store after errors; AH and Picnic go on.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 PICNIC = "picnic"
+JUMBO = "jumbo"
+STORES = (PICNIC, JUMBO)
+STORE_NAMES = {PICNIC: "Picnic", JUMBO: "Jumbo"}
 # Picnic's image CDN, as in python-picnic-api2 (helper.get_image): <base>/<image_id>/<size>.png
 PICNIC_IMAGE = "https://storefront-prod.nl.picnicinternational.com/static/images/{}/small.png"
 
@@ -91,3 +102,99 @@ def picnic_lookup(client, gtin: str) -> dict[str, Any] | None:
     """The Picnic article for a barcode: article_id, title, price and original_price (euro), unit. None if Picnic
     doesn't sell it (blocking)."""
     return _article(client.get_article_by_gtin(gtin))
+
+
+class PicnicStore:
+    """Picnic through its blocking client, in the executor."""
+
+    def __init__(self, hass, client) -> None:
+        self._hass, self._client = hass, client
+
+    async def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        return await self._hass.async_add_executor_job(picnic_search, self._client, query, limit)
+
+    async def article(self, article_id: str) -> dict[str, Any] | None:
+        return await self._hass.async_add_executor_job(picnic_article, self._client, article_id)
+
+    async def lookup(self, gtin: str) -> dict[str, Any] | None:
+        return await self._hass.async_add_executor_job(picnic_lookup, self._client, gtin)
+
+
+JUMBO_SITE = "https://www.jumbo.com/"
+JUMBO_API = "https://www.jumbo.com/api/graphql"
+JUMBO_VERSION = "master-v39.5.2-web"  # used when the home page doesn't say (seen in October 2026)
+JUMBO_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+_JUMBO_FIELDS = "id title subtitle ean image price { price promoPrice }"
+_JUMBO_SEARCH = ("query SearchProducts($input: ProductSearchInput!) { searchProducts(input: $input) { products { "
+                 + _JUMBO_FIELDS + " } } }")
+_JUMBO_PRODUCT = "query Product($sku: String!) { product(sku: $sku) { " + _JUMBO_FIELDS + " } }"
+
+
+class JumboError(Exception):
+    """Jumbo answered with an error (or not with data)."""
+
+
+class JumboStore:
+    """Jumbo through the GraphQL API of its website (async, aiohttp)."""
+
+    def __init__(self, session) -> None:
+        self._session = session
+        self._version: str | None = None
+
+    async def _headers(self) -> dict[str, str]:
+        if not self._version:
+            # the website's own client version (the API refuses requests without one)
+            try:
+                async with self._session.get(JUMBO_SITE, headers={"User-Agent": JUMBO_UA}) as resp:
+                    page = await resp.text()
+                m = re.search(r'name:"JUMBO_WEB",version:"([^"]+)"', page)
+                self._version = m[1] if m else JUMBO_VERSION
+            except Exception:  # noqa: BLE001 - any network error: try the known version
+                self._version = JUMBO_VERSION
+        return {"User-Agent": JUMBO_UA, "content-type": "application/json", "apollographql-client-name": "JUMBO_WEB",
+                "apollographql-client-version": self._version, "x-source": "JUMBO_WEB-search"}
+
+    async def _query(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        async with self._session.post(JUMBO_API, json={"query": query, "variables": variables},
+                                      headers=await self._headers()) as resp:
+            if resp.status != 200:
+                self._version = None  # maybe a new version of the website: read it again next time
+                raise JumboError(f"Jumbo: HTTP {resp.status}")
+            body = await resp.json(content_type=None)
+        if not isinstance(body, dict) or body.get("errors") and not body.get("data"):
+            raise JumboError(f"Jumbo: {(body.get('errors') or [{}])[0].get('message') if isinstance(body, dict) else body}")
+        return body.get("data") or {}
+
+    async def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        data = await self._query(_JUMBO_SEARCH, {"input": {"searchTerms": query, "searchType": "keyword", "offSet": 0,
+                                                             "limit": limit}})
+        return [a for p in ((data.get("searchProducts") or {}).get("products") or []) if (a := jumbo_article(p))]
+
+    async def article(self, article_id: str) -> dict[str, Any] | None:
+        return jumbo_article((await self._query(_JUMBO_PRODUCT, {"sku": article_id})).get("product"))
+
+    async def lookup(self, gtin: str) -> dict[str, Any] | None:
+        """Search on the barcode; only a product with exactly that EAN counts."""
+        ean = gtin.lstrip("0").zfill(13)  # a GTIN-14 with a leading zero is the EAN-13 Jumbo searches on
+        data = await self._query(_JUMBO_SEARCH, {"input": {"searchTerms": ean, "searchType": "keyword", "offSet": 0,
+                                                             "limit": 3}})
+        for p in (data.get("searchProducts") or {}).get("products") or []:
+            if (p.get("ean") or "").lstrip("0") == gtin.lstrip("0"):
+                return jumbo_article(p)
+        return None
+
+
+def jumbo_article(p: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A Jumbo product as an article: the offer price when there is one (then original_price is the normal one)."""
+    if not p or not p.get("id"):
+        return None
+    price = p.get("price") or {}
+    promo = price.get("promoPrice")
+    return {
+        "article_id": p["id"],
+        "title": p.get("title"),
+        "price": _euro(promo if promo else price.get("price")),
+        "original_price": _euro(price.get("price")) if promo else None,
+        "unit": p.get("subtitle"),
+        "image_url": p.get("image"),
+    }

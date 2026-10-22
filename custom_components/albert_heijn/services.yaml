@@ -358,7 +358,7 @@ set_list_quantity:
 confirm_match:
   name: Confirm or reject a store match
   description: >-
-    Confirm that a Picnic product is the same as (or a good alternative for) one of yours, or reject it: a rejected
+    Confirm that a product at Picnic or Jumbo is the same as (or a good alternative for) one of yours, or reject it: a rejected
     product is never matched again and the next best is looked up right away.
   fields:
     product_id:
@@ -370,7 +370,7 @@ confirm_match:
           min: 1
           mode: box
     article_id:
-      name: Picnic article ID
+      name: Article ID at the store
       required: true
       selector:
         text:
@@ -379,11 +379,20 @@ confirm_match:
       required: true
       selector:
         boolean:
+    store:
+      name: Store
+      description: Default picnic.
+      default: picnic
+      selector:
+        select:
+          options:
+            - picnic
+            - jumbo
 
 search_store_products:
-  name: Search Picnic for a product
+  name: Search another store for a product
   description: >-
-    Search Picnic for one of your products (by default by its name without size and store brand). Every result
+    Search Picnic or Jumbo for one of your products (by default by its name without size and store brand). Every result
     comes with a match score; choose one with confirm_match.
   fields:
     product_id:
@@ -399,3 +408,12 @@ search_store_products:
       description: Optional; default the product name.
       selector:
         text:
+    store:
+      name: Store
+      description: Default picnic.
+      default: picnic
+      selector:
+        select:
+          options:
+            - picnic
+            - jumbo

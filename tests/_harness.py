@@ -51,6 +51,7 @@ _module("homeassistant")
 _module("homeassistant.core", HomeAssistant=object)
 _module("homeassistant.helpers")
 _module("homeassistant.helpers.storage", Store=_Store)
+_module("homeassistant.helpers.aiohttp_client", async_get_clientsession=lambda hass: None)
 _module("homeassistant.util", dt=_dt_util)
 _module("aiohttp", ClientSession=object)
 
@@ -67,3 +68,9 @@ class ConfigEntries:
 
     def async_entries(self, domain: str):
         return [e for e in self.entries if e.domain == domain]
+
+
+# no network in the tests: only Picnic (faked per test) as other store; test_jumbo.py puts Jumbo back with a fake
+import importlib as _importlib  # noqa: E402
+
+_importlib.import_module("albert_heijn.compare").STORES = ("picnic",)

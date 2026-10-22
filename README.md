@@ -39,7 +39,7 @@ analysis services were added in this fork.
 | Suggestions | Due products and good bonus deals put on the AH shopping list automatically, with the reason why |
 | Analysis | Spending per month and week, biggest items, categories, bonus savings, price movers, a product overview |
 | Barcode | Barcode (EAN) to AH product, for scanning what has run out |
-| Other stores | The same products at Picnic, matched on barcode (EAN), and the shopping list compared |
+| Other stores | The same products at Picnic and Jumbo, matched on barcode (EAN) or name and size, and the shopping list compared per store |
 | Assist | "Zet melk op de lijst" (asks which one when in doubt), order status and changing the order by voice |
 
 The AH shopping list itself (add, tick off, the basket in the AH app) is not part of this integration. Use
@@ -69,37 +69,45 @@ config entry and entities are kept.
 The proxy runs on a random port of your Home Assistant host, and the browser has to be able to reach it. On your
 home network it works with the local IP address.
 
-### Other stores: Picnic (optional)
+### Other stores: Picnic and Jumbo
 
 Set up the official **Picnic** integration of Home Assistant. This integration uses that integration's own
 connection (one session and login token; Picnic can hand out a new token with any answer and the Picnic integration
 stores it), and every week looks up the products you buy at Picnic. There is nothing to configure here; without the
 Picnic integration, or while it is not loaded, this step is skipped.
 
-Gentle on Picnic: 2 seconds between requests, at most 300 products per run, at most 2 searches per product. After an
-error it waits and goes on; after 3 errors in a row it stops and leaves Picnic alone for 24 hours.
+**Jumbo** needs nothing: no account. It is looked up through the GraphQL API that jumbo.com itself uses
+(`/api/graphql`, with the website's client name and version, read from its home page). That API is not documented
+and Jumbo can change it; then the Jumbo checks fail, Jumbo is paused like below, and AH and Picnic go on. Plus is
+not supported: plus.nl is behind a bot wall (Imperva) that only lets real browsers in.
+
+Gentle on every store: 2 seconds between requests, at most 300 products per run, at most 3 searches per product.
+After an error it waits and goes on; after 3 errors in a row it stops and leaves that store alone for 24 hours.
 
 Each product you buy is matched in this order, and every match gets a kind and a score:
 
 | Kind | How | Score |
 |---|---|---|
-| `confirmed` | You confirmed this Picnic product (`confirm_match`) | 100 |
+| `confirmed` | You confirmed this product of the store (`confirm_match`) | 100 |
+| `auto` | Found by name, same size, score 95: confirmed automatically (you can still reject it) | 100 |
 | `ean` | Same barcode | 100 |
 | `same` | Found by name (without size and store brand), same size | 60–95 |
 | `size` | Same product, other size (Calvé 450 g vs 650 g): compared per kg / litre and recalculated to your size | 60–95 |
 | `similar` | Comparable product, size not comparable (pieces vs kg, or unknown) | 60–95 |
 
 A branded product only matches the same brand (at least half of its words, "Mentos Gum" / "Mentos"); a store brand
-(AH, also De Zaanse Hoeve, Care, Streeckgenoten) can match another store brand (Picnic). Score: the share of your
+(AH, also De Zaanse Hoeve, Care, Streeckgenoten) can match another store brand (Picnic, Jumbo). Score: the share of your
 words found there, minus 15 per extra word and another 15 when a word is swapped (another flavour), +5 for the
 brand. Grades must agree ("48+" / "30+", "0%" / "5%": at most 40). Words that say nothing ("echte", "luxe", "thee",
-"pitloze", packaging like "grootverpakking") are left out; colours, "zero"/"0%" and "bio"/"biologisch" are the
+"pitloze", packaging like "grootverpakking", "blik", "fles", "krat") are left out; "0.0" beer is another product than
+the normal one; colours, "zero"/"0%" and "bio"/"biologisch" are the
 same word; "koppen", "cups" and "capsules" count as pieces. The rules were tuned on a real export of matches;
 the examples are in `tests/test_store_match.py`.
 Other flavours or variants (paprika vs naturel, regular vs zero) score below 60 and are not shown. A barcode often
 differs per pack size and sometimes per country label (a German Nutella jar), which is why the name match exists.
 
-`compare_list` totals: **sure** (barcode or confirmed) and **likely** (all matches, other sizes recalculated).
+`compare_list` totals per store (`by_store`): **sure** (barcode or confirmed) and **likely** (all matches, other
+sizes recalculated), each only over the products that store sells.
 Confirm a likely match to make it sure; reject it and the next best is looked up right away (a rejected product is
 never matched again).
 
@@ -134,7 +142,7 @@ Orders (from the original integration): "wat zit er in mijn bestelling", "wannee
 | Prices of everything you buy | Once a week (and on Monday before `fill_list`) | Whole list (that is the measurement) |
 | Bonus this week and next week | Once a day (the first sync of the day) | Per week |
 | EAN (barcode) of the products you buy | Every sync, for products without one | Each product at most once a week while AH doesn't give one |
-| Prices at Picnic (with the Picnic integration) | Weekly per product | Matched: only the price of the matched article (1 request). New: barcode, else name. Not found: again after 4 weeks |
+| Prices at Picnic (with the Picnic integration) and Jumbo | Weekly per product | Matched: only the price of the matched article (1 request). New: barcode, else name. Not found: again after 4 weeks |
 | A product new to you on the shopping list or in the next order (also from the AH app), or opened with `get_product_history` | Right away (every 5 minutes, in the background) | Details, AH price, EAN and the Picnic match; each product once, at most 10 per round. After that the weekly rounds take over once you buy it |
 | Missing product details (title, category, image) | Every sync, for products that lack them | Each product at most once a week; products AH no longer sells online show the name from the till receipt |
 
@@ -250,8 +258,8 @@ All services are in the `albert_heijn` domain. Services marked with *response* r
 | `snooze_product` *response* | `product_id`, `days` (7; -1 never, 0 again) | Don't suggest a product for a while |
 | `set_list_quantity` | `product_id`, `quantity` (0 removes), `title` | Set how many of a product are on the AH shopping list |
 | `compare_list` *response* | | The shopping list with the AH price and the Picnic price (match kind, score, recalculated size); totals sure and likely |
-| `search_store_products` *response* | `product_id`, `query` (optional) | Search Picnic for one of your products; results with match score, best first |
-| `confirm_match` *response* | `product_id`, `article_id`, `confirmed` | Confirm or reject the Picnic product matched to one of yours; returns what is matched now |
+| `search_store_products` *response* | `product_id`, `query` (optional), `store` (`picnic` / `jumbo`) | Search Picnic for one of your products; results with match score, best first |
+| `confirm_match` *response* | `product_id`, `article_id`, `confirmed`, `store` | Confirm or reject the Picnic product matched to one of yours; returns what is matched now |
 | `get_bonus` *response* | `week` (`current` / `next`) | Bonus on what you buy, with the price per item, your average and the saving |
 
 ### Analysis
@@ -339,7 +347,7 @@ custom_components/albert_heijn/
   config_flow.py   login and reauth
   coordinator.py   upcoming orders every 5 minutes; entry point for history, fill and cleanup
   history.py       sync of history, receipts, catalog, prices and bonus; rhythm (compute_frequent); fill and cleanup
-  compare.py       other stores (Picnic through the HA Picnic integration's login)
+  compare.py       other stores (Picnic through the HA Picnic integration's login, Jumbo through jumbo.com)
   suggest.py       pure logic: offers, effective price, bonus check, suggestions (no I/O)
   db.py            SQLite schema and queries (blocking, always run in the executor)
   sensor.py        sensors
@@ -378,6 +386,7 @@ stores tokens in `.tokens.json` (git-ignored). `python scripts/live_api.py` then
 | Bonus | `/mobile-services/bonuspage/v3/metadata`, `…/v2/section/previously-bought`, `…/v1/personal` |
 | EAN of a product | `GET /mobile-services/product/detail/v4/fir/{id}` (every field named gtin/ean is taken) |
 | Picnic | `python-picnic-api2` `get_article_by_gtin` (the library of the HA Picnic integration) |
+| Jumbo | `POST https://www.jumbo.com/api/graphql`: `searchProducts` (also on EAN) and `product(sku)`, with `ean`, `price { price promoPrice }` |
 
 GraphQL introspection is disabled at AH. `graphql_query` is meant for trying things out.
 

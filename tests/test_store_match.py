@@ -117,4 +117,17 @@ best = s.best_match({"title": "AH Halfvolle melk", "brand": "AH", "unit_size": "
                     [{"article_id": "a", "title": "Picnic volle melk", "unit": "1 liter"},
                      {"article_id": "b", "title": "Picnic halfvolle melk", "unit": "1 liter"}], skip={"x"})
 assert best["article_id"] == "b"
+# Jumbo (sample of 22 Oct): its store brand like AH's, packaging words in its titles, loose pieces without a size,
+# and 0.0 is another beer
+for mine, theirs in [
+    (("AH Appelsap", "AH", "1,5 l"), ("Jumbo Appelsap 1,5 L", "1.5 L")),
+    (("AH Extra jam aardbeien", "AH", "430 g"), ("Jumbo's Extra Jam Aardbei 430 g", "430 g")),
+    (("AH Paprika rood", "AH", "per stuk"), ("Jumbo Paprika Rood", None)),
+    (("Heineken Premium pilsener 6-pack", "Heineken", "6 x 0,33 l"), ("Heineken Premium Pilsener Bier Blik 6 x 330ml", "6 x 330 ml")),
+]:
+    assert score(mine, theirs) == {"score": 95, "kind": "same"}, (mine[0], score(mine, theirs))
+assert score(("Heineken Premium pilsener 6-pack", "Heineken", "6 x 0,33 l"),
+             ("Heineken Premium Pilsener 0.0 Bier Blik 6 x 330ml", "6 x 330 ml"))["score"] <= 40
+assert score(("Heineken 0.0 alcoholvrij bier", "Heineken", "6 x 0,33 l"),
+             ("Heineken Premium Pilsener Bier Blik 6 x 330ml", "6 x 330 ml"))["score"] <= 40
 print("MATCH OK")

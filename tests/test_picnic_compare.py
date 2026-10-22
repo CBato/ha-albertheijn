@@ -14,6 +14,7 @@ history = importlib.import_module("albert_heijn.history")
 compare = importlib.import_module("albert_heijn.compare")
 db = importlib.import_module("albert_heijn.db")
 history.STORE_PAUSE = 0
+compare.STORES = (compare.PICNIC,)  # Jumbo has its own test
 history.AUTO_CONFIRM_SCORE = 101  # first without auto-confirm; checked separately at the end
 
 # your products: 1 branded with EAN, 2 Calvé without EAN at Picnic (other size there), 3 store brand
@@ -83,9 +84,9 @@ async def main():
     await h._run(db.save_prices, today, [{"product_id": 1, "price": 2.49}, {"product_id": 2, "price": 2.99}, {"product_id": 3, "price": 1.19}])
 
     assert await h._fetch_gtins(now) == 2
-    assert await h._fetch_picnic(today, now) is None
+    assert await h._fetch_store("picnic", today) is None
     n = FakePicnic.calls
-    await h._fetch_picnic(today, now)
+    await h._fetch_store("picnic", today)
     assert FakePicnic.calls == n  # everything checked this week
 
     got = await h._run(db.store_prices_for, [1, 2, 3])
@@ -128,7 +129,7 @@ async def main():
     n, a = FakePicnic.calls, FakePicnic.article_calls
     next_week = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
     history.date = type("D", (date,), {"today": staticmethod(lambda: date.fromisoformat(next_week))})
-    assert await h._fetch_picnic(next_week, now) is None
+    assert await h._fetch_store("picnic", next_week) is None
     history.date = date
     assert FakePicnic.calls == n + 2 and FakePicnic.article_calls == a + 2, (FakePicnic.calls - n, FakePicnic.article_calls - a)
     assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["match"] == "size"  # kind and score kept
@@ -169,16 +170,16 @@ async def main():
     await h._run(db.save_order, 11, "2026-10-19", "delivered", [{"product_id": 7, "title": "Coca-Cola Light", "brand": "Coca-Cola",
                                                                   "unit_size": "1,5 l", "quantity": 1, "price": 2.0}], now)
     await h._run(db.save_gtins, 7, ["8710400000077"], now)
-    assert await h._fetch_picnic("2026-11-30", now) is None  # one error, then on
+    assert await h._fetch_store("picnic", "2026-11-30") is None  # one error, then on
     for pid in (21, 22, 23):  # three new products, Picnic keeps failing
         await h._run(db.save_order, 100 + pid, "2026-10-19", "delivered", [{"product_id": pid, "title": f"Merk product {pid}", "brand": "Merk",
                                                                              "unit_size": "1 l", "quantity": 1, "price": 1.0}], now)
         await h._run(db.save_gtins, pid, [f"87104000000{pid}"], now)
     FakePicnic.get_article_by_gtin = lambda self, gtin: (_ for _ in ()).throw(ValueError("Expecting value"))
-    err = await h._fetch_picnic("2026-12-30", now)
+    err = await h._fetch_store("picnic", "2026-12-30")
     assert err and "gestopt na" in err, err
     # after a stopped round Picnic is left alone for a day
-    again = await h._fetch_picnic("2026-12-30", now)
+    again = await h._fetch_store("picnic", "2026-12-30")
     assert again and "gepauzeerd" in again, again
     h.meta.pop("picnic_paused_until")
     assert {21, 22, 23} <= {p["product_id"] for p in await h._run(db.store_due, "picnic", "2026-10-22", 100)}  # still to do
@@ -188,9 +189,9 @@ async def main():
     shared = FakePicnic()
     entry = Hass.config_entries.entries[0]
     entry.runtime_data = NS(picnic_api_client=shared)
-    assert (await h._picnic())[0] is shared
+    assert (await h._client("picnic"))[0]._client is shared
     entry.state = NS(value="setup_retry")
-    client, why = await h._picnic()
+    client, why = await h._client("picnic")
     assert client is None and "niet geladen" in why
     del entry.state, entry.runtime_data
 
@@ -211,7 +212,7 @@ async def main():
     # without the Picnic integration: skipped, no error
     Hass.config_entries = ConfigEntries()
     n = FakePicnic.calls
-    assert await h._fetch_picnic("2026-10-30", now) is None and FakePicnic.calls == n
+    assert await h._fetch_store("picnic", "2026-10-30") is None and FakePicnic.calls == n
     print("PICNIC OK")
 
 

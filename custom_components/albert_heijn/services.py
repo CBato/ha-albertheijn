@@ -12,6 +12,7 @@ from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
 
 from .api import AlbertHeijnApiError
+from .compare import PICNIC, STORES
 from .const import DOMAIN
 from .coordinator import AlbertHeijnCoordinator
 from .history import OrderHistory
@@ -40,6 +41,7 @@ SERVICE_CONFIRM_MATCH = "confirm_match"
 SERVICE_SEARCH_STORE = "search_store_products"
 
 ATTR_QUERY = "query"
+ATTR_STORE = "store"
 ATTR_PRODUCT_ID = "product_id"
 ATTR_PRODUCTS = "products"
 ATTR_QUANTITY = "quantity"
@@ -155,11 +157,13 @@ CONFIRM_MATCH_SCHEMA = vol.Schema(
         vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int),
         vol.Required("article_id"): cv.string,
         vol.Required("confirmed"): cv.boolean,
+        vol.Optional(ATTR_STORE, default=PICNIC): vol.In(STORES),
     }
 )
 
 SEARCH_STORE_SCHEMA = vol.Schema(
-    {vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int), vol.Optional(ATTR_QUERY): cv.string}
+    {vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int), vol.Optional(ATTR_QUERY): cv.string,
+     vol.Optional(ATTR_STORE, default=PICNIC): vol.In(STORES)}
 )
 
 GET_BONUS_SCHEMA = vol.Schema({vol.Optional("week", default="current"): vol.In(["current", "next"])})
@@ -294,18 +298,19 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     async def handle_search_store(call: ServiceCall) -> ServiceResponse:
         """Search Picnic for one of your products; results with match score (choose one with confirm_match)."""
         try:
-            return await _get_history(hass).async_search_store(call.data[ATTR_PRODUCT_ID], call.data.get(ATTR_QUERY))
-        except Exception as err:  # noqa: BLE001 - also errors and timeouts of the Picnic library
-            raise HomeAssistantError(f"Search at Picnic failed: {err}") from err
+            return await _get_history(hass).async_search_store(call.data[ATTR_PRODUCT_ID], call.data.get(ATTR_QUERY),
+                                                               call.data[ATTR_STORE])
+        except Exception as err:  # noqa: BLE001 - also errors and timeouts of the stores' libraries
+            raise HomeAssistantError(f"Search at {call.data[ATTR_STORE]} failed: {err}") from err
 
     async def handle_confirm_match(call: ServiceCall) -> ServiceResponse:
         """Confirm or reject the Picnic product matched to one of yours; returns what is matched now."""
         try:
             match = await _get_history(hass).async_confirm_match(
-                call.data[ATTR_PRODUCT_ID], call.data["article_id"], call.data["confirmed"])
-        except Exception as err:  # noqa: BLE001 - also errors of the Picnic library
+                call.data[ATTR_PRODUCT_ID], call.data["article_id"], call.data["confirmed"], call.data[ATTR_STORE])
+        except Exception as err:  # noqa: BLE001 - also errors of the stores' libraries
             raise HomeAssistantError(f"Could not update the match: {err}") from err
-        return {"picnic": match}
+        return {call.data[ATTR_STORE]: match}
 
     async def handle_compare_list(call: ServiceCall) -> ServiceResponse:
         """The AH shopping list with the price at AH and at other stores (matched on EAN)."""

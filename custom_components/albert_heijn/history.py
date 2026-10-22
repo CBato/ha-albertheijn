@@ -14,6 +14,7 @@ from statistics import median
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -203,6 +204,7 @@ class OrderHistory:
         self._learn_lock = asyncio.Lock()  # one lookup of new products at a time
         self._learned: set[int] = set()  # looked up since the start (also when nothing was found): not again
         self._learning: set[int] = set()  # being looked up now (the app shows "looking up" and asks again)
+        self._jumbo: compare.JumboStore | None = None
         self._max: int | None = None  # products per heavy step in the running sync (None = the default)
         self._retry = False  # look again for products not found at other stores this week
         self.meta: dict[str, str] = {}
@@ -262,8 +264,16 @@ class OrderHistory:
             await self._run(db.mark_auto_matches, compare.PICNIC)
             self.meta["matching_v5"] = _now()
             await self._run(db.set_meta, {"matching_v5": self.meta["matching_v5"]})
-        if n := await self._run(db.confirm_high_scores, compare.PICNIC, AUTO_CONFIRM_SCORE, _now()):
-            _LOGGER.info("Albert Heijn: %d Picnic matches with score %d+ confirmed", n, AUTO_CONFIRM_SCORE)
+        if not self.meta.get("matching_v6"):
+            # once (0.31.0): rules added for Jumbo that also count at Picnic (packaging words, 0.0 = alcohol-free,
+            # loose pieces without a size)
+            await self._run(db.rescore_name_matches, compare.PICNIC)
+            await self._run(db.recheck_confirmed, compare.PICNIC, ("auto",))
+            self.meta["matching_v6"] = _now()
+            await self._run(db.set_meta, {"matching_v6": self.meta["matching_v6"]})
+        for store in compare.STORES:
+            if n := await self._run(db.confirm_high_scores, store, AUTO_CONFIRM_SCORE, _now()):
+                _LOGGER.info("Albert Heijn: %d %s matches with score %d+ confirmed", n, store, AUTO_CONFIRM_SCORE)
 
     async def _import_old_store(self) -> None:
         """One-time import of the JSON history of fork 0.6/0.7 (.storage/albert_heijn.history.<entry>)."""
@@ -353,6 +363,7 @@ class OrderHistory:
         data["rhythm"] = rhythm
         data["snoozed_until"] = self.snoozes.get(product_id)
         data["picnic_connected"] = compare.picnic_credentials(self._hass) is not None
+        data["stores_connected"] = self.stores()
         data["totals"] = {
             "purchases": len(purchases),
             "quantity": round(sum(float(p.get("quantity") or 0) for p in purchases), 1),
@@ -600,14 +611,15 @@ class OrderHistory:
                     _LOGGER.debug("EAN codes not available: %s", err)
                     errors.append(f"EAN: {err}")
 
-                # 8. The same products at Picnic (only with the Picnic integration of Home Assistant)
-                if err_picnic := await self._fetch_picnic(today, now):
-                    errors.append(f"Picnic: {err_picnic}")
+                # 8. The same products at the other stores (Picnic only with its integration of Home Assistant)
+                for store in self.stores():
+                    if err_store := await self._fetch_store(store, today):
+                        errors.append(f"{compare.STORE_NAMES[store]}: {err_store}")
                 self.store_counts = await self._run(db.store_counts)
-                # still to do at Picnic (e.g. after an interrupted round)
-                if compare.picnic_credentials(self._hass):
-                    self.store_counts["picnic_todo"] = len(await self._run(
-                        db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), 5000, False,
+                # still to do per store (e.g. after an interrupted round)
+                for store in self.stores():
+                    self.store_counts[f"{store}_todo"] = len(await self._run(
+                        db.store_due, store, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), 5000, False,
                         (date.today() - timedelta(days=STORE_RETRY_DAYS - 1)).isoformat()))
 
             self.meta["synced_at"] = now
@@ -724,16 +736,15 @@ class OrderHistory:
 
     async def async_learn(self, product_ids: list[int], wait: bool = True) -> bool:
         """Products new to us (on the list, never bought): fetch their details and AH price, their EAN and the match at
-        Picnic right away instead of waiting for the nightly rounds. Each product once per start. With wait=False the
-        lookup runs in the background. Returns whether there was something to look up."""
+        the other stores right away instead of waiting for the nightly rounds. Each product once per start. With
+        wait=False the lookup runs in the background. Returns whether there was something to look up."""
         ids = [int(i) for i in product_ids if i and int(i) not in self._learned]
         if not ids:
             return False
-        picnic = compare.PICNIC if compare.picnic_entry(self._hass) else None
-        todo = await self._run(db.to_learn, ids, picnic)
-        ids = list(dict.fromkeys(todo["details"] + todo["gtin"] + todo["store"]))[:LEARN_MAX]
-        missing = set(todo["details"] + todo["gtin"] + todo["store"])
-        self._learned.update(int(i) for i in product_ids if i and int(i) not in missing)  # nothing missing: done
+        todo = await self._run(db.to_learn, ids, self.stores())
+        missing = set(todo["details"] + todo["gtin"]).union(*todo["stores"].values())
+        self._learned.update(i for i in ids if i not in missing)  # nothing missing: done
+        ids = [i for i in dict.fromkeys(ids) if i in missing][:LEARN_MAX]
         if not ids:
             return False
         self._learning.update(ids)
@@ -743,13 +754,13 @@ class OrderHistory:
         await self._learn(ids, todo)
         return True
 
-    async def _learn(self, ids: list[int], todo: dict[str, list[int]]) -> None:
+    async def _learn(self, ids: list[int], todo: dict[str, Any]) -> None:
         try:
             await self._learn_now(ids, todo)
         finally:
             self._learning.difference_update(ids)
 
-    async def _learn_now(self, ids: list[int], todo: dict[str, list[int]]) -> None:
+    async def _learn_now(self, ids: list[int], todo: dict[str, Any]) -> None:
         async with self._learn_lock:
             ids = [i for i in ids if i not in self._learned]
             self._learned.update(ids)
@@ -769,21 +780,23 @@ class OrderHistory:
                     await self._run(db.save_gtins, pid, await self._api.get_product_gtins(pid), now)
             except AlbertHeijnApiError as err:
                 _LOGGER.debug("Looking up new products at AH failed: %s", err)
-            if not (store := [i for i in ids if i in todo["store"]]) or (self.meta.get("picnic_paused_until") or "") > now:
-                return
-            client, err = await self._picnic()
-            if not client:
-                return
-            matches = await self._run(db.store_matches, compare.PICNIC)
-            for pid in store:
-                if product := await self._run(db.product_for_store, pid):
-                    if not product.get("gtins") and not product.get("title"):
+            for store, due in todo["stores"].items():
+                due = [i for i in ids if i in due]
+                if not due or self._paused(store):
+                    continue
+                client, _err = await self._client(store)
+                if not client:
+                    continue
+                matches = await self._run(db.store_matches, store)
+                for pid in due:
+                    product = await self._run(db.product_for_store, pid)
+                    if not product or not product.get("gtins") and not product.get("title"):
                         continue
                     try:
-                        await self._picnic_check(client, product, matches, today)
-                    except Exception as err:  # noqa: BLE001 - see _fetch_picnic; the nightly round tries again
-                        _LOGGER.debug("Picnic check of new product %s failed: %s", pid, err)
-                        return
+                        await self._store_check(store, client, product, matches, today)
+                    except Exception as err:  # noqa: BLE001 - see _fetch_store; the nightly round tries again
+                        _LOGGER.debug("%s check of new product %s failed: %s", store, pid, err)
+                        break
                     await asyncio.sleep(STORE_PAUSE)
 
     async def _fetch_gtins(self, now: str) -> int:
@@ -797,41 +810,52 @@ class OrderHistory:
             await asyncio.sleep(REQUEST_PAUSE)
         return found
 
-    async def _picnic(self):
-        """The client of the Picnic integration (shared session and token), or (None, reason)."""
+    def stores(self) -> list[str]:
+        """The other stores to compare with: Picnic when its integration is set up, Jumbo always (no account)."""
+        return [s for s in compare.STORES if s != compare.PICNIC or compare.picnic_entry(self._hass)]
+
+    def _paused(self, store: str) -> bool:
+        return (self.meta.get(f"{store}_paused_until") or "") > _now()
+
+    async def _client(self, store: str):
+        """The store's client (search / article / lookup), or (None, reason)."""
+        if store == compare.JUMBO:
+            if self._jumbo is None:
+                self._jumbo = compare.JumboStore(async_get_clientsession(self._hass))
+            return self._jumbo, None
         entry = compare.picnic_entry(self._hass)
         if not entry:
             return None, None  # no Picnic integration: nothing to compare
         if not compare.picnic_loaded(entry):
             return None, "Picnic-integratie niet geladen; overgeslagen"
         if client := compare.shared_client(entry):
-            return client, None
+            return compare.PicnicStore(self._hass, client), None
         client = await self._hass.async_add_executor_job(compare.picnic_client, compare.picnic_credentials(self._hass))
-        return (client, None) if client else (None, "python-picnic-api2 not installed")
+        return (compare.PicnicStore(self._hass, client), None) if client else (None, "python-picnic-api2 not installed")
 
-    async def _picnic_check(self, client, product: dict[str, Any], matches: dict[int, dict[str, Any]], today: str) -> None:
-        """Find one product at Picnic: the confirmed article, else the same barcode, else the best match by name
+    async def _store_check(self, store: str, client, product: dict[str, Any], matches: dict[int, dict[str, Any]], today: str) -> None:
+        """Find one product at a store: the confirmed article, else the same barcode, else the best match by name
         and size (never a rejected one). Saves the result, also "not found"."""
         pid = product["product_id"]
 
-        async def job(func, *args):
-            return await asyncio.wait_for(self._hass.async_add_executor_job(func, *args), STORE_TIMEOUT)
+        async def ask(call):
+            return await asyncio.wait_for(call, STORE_TIMEOUT)
 
         m = matches.get(pid) or {"confirmed": None, "rejected": set()}
         found, guess = None, None
         if m["confirmed"]:
-            if found := await job(compare.picnic_article, client, m["confirmed"]):
+            if found := await ask(client.article(m["confirmed"])):
                 found.update(match="auto" if m.get("auto") else "confirmed", score=100)
         # matched before on barcode or same name and size: only the new price of that article (search again only when
         # it is gone). Another size or a similar product: search again, a better match may exist (the same size).
         last = product.get("last_article")
         if not found and last and last not in m["rejected"] and product.get("last_match") in ("ean", "same", "auto"):
-            if found := await job(compare.picnic_article, client, last):
+            if found := await ask(client.article(last)):
                 found.update(match=product.get("last_match") or "ean", score=product.get("last_score") or 100)
         for gtin in product.get("gtins") or ([product["gtin"]] if product.get("gtin") else []):
             if found:
                 break
-            hit = await job(compare.picnic_lookup, client, gtin)
+            hit = await ask(client.lookup(gtin))
             if hit and hit.get("article_id") not in m["rejected"]:
                 found = {**hit, "match": "ean", "score": 100}
         if not found and product.get("title"):
@@ -839,50 +863,50 @@ class OrderHistory:
             candidates: dict[str, dict[str, Any]] = {}
             for query in search_queries(product["title"], product.get("brand"))[:3]:
                 await asyncio.sleep(STORE_PAUSE)
-                for c in await job(compare.picnic_search, client, query):
+                for c in await ask(client.search(query)):
                     candidates.setdefault(c["article_id"], c)
                 if best_match(product, list(candidates.values()), m["rejected"]):
                     break
             if best := best_match(product, list(candidates.values()), m["rejected"]):
-                found = {k: best.get(k) for k in ("article_id", "title", "price", "unit", "image_url")}
+                found = {k: best.get(k) for k in ("article_id", "title", "price", "original_price", "unit", "image_url")}
                 found.update(match=best["kind"], score=best["score"])
             elif best := best_match(product, list(candidates.values()), m["rejected"], GUESS_MIN_SCORE):
                 # not good enough to count, but worth a look: confirm it by hand
                 guess = {k: best.get(k) for k in ("article_id", "title", "price", "unit", "image_url", "score", "kind")}
         if found and found.get("match") == "same" and found["score"] >= AUTO_CONFIRM_SCORE:
-            await self._run(db.add_confirmed_match, compare.PICNIC, pid, found["article_id"], _now(), "auto")
+            await self._run(db.add_confirmed_match, store, pid, found["article_id"], _now(), "auto")
             found.update(match="auto", score=100)
-        await self._run(db.save_store_price, compare.PICNIC, pid, today, found, guess)
+        await self._run(db.save_store_price, store, pid, today, found, guess)
 
-    async def _fetch_picnic(self, today: str, now: str) -> str | None:
-        """Weekly Picnic prices. Matched products: only the price of their article (1 request). New products: barcode,
-        else name and size. Not found: looked for again after STORE_RETRY_DAYS (or now with retry_not_found).
+    async def _fetch_store(self, store: str, today: str) -> str | None:
+        """Weekly prices at a store. Matched products: only the price of their article (1 request). New products:
+        barcode, else name and size. Not found: looked for again after STORE_RETRY_DAYS (or now with retry_not_found).
         Returns an error text, or None."""
-        paused = self.meta.get("picnic_paused_until") or ""
-        if paused > _now():
-            return f"Picnic gepauzeerd tot {paused[:16].replace('T', ' ')} (na fouten)"
-        due = await self._run(db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(),
+        if self._paused(store):
+            paused = self.meta.get(f"{store}_paused_until") or ""
+            return f"gepauzeerd tot {paused[:16].replace('T', ' ')} (na fouten)"
+        due = await self._run(db.store_due, store, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(),
                              min(self._max or STORE_MAX, STORE_RUN_MAX), self._retry,
                              (date.today() - timedelta(days=STORE_RETRY_DAYS - 1)).isoformat())
         if not due:
             return None
-        client, err = await self._picnic()
+        client, err = await self._client(store)
         if not client:
             return err
-        matches = await self._run(db.store_matches, compare.PICNIC)
+        matches = await self._run(db.store_matches, store)
         errors, done = 0, 0
         for product in due:
             try:
-                await self._picnic_check(client, product, matches, today)
-            except Exception as err:  # noqa: BLE001 - the Picnic library raises its own and requests' errors
-                # e.g. Picnic slowing down (an empty answer): wait and go on; the product stays due for next time
+                await self._store_check(store, client, product, matches, today)
+            except Exception as err:  # noqa: BLE001 - the stores' libraries raise their own and network errors
+                # e.g. the store slowing down (an empty answer): wait and go on; the product stays due for next time
                 errors += 1
-                _LOGGER.warning("Picnic check of %s failed (%d in a row): %s", product["product_id"], errors, err)
+                _LOGGER.warning("%s check of %s failed (%d in a row): %s", store, product["product_id"], errors, err)
                 if errors >= STORE_MAX_ERRORS:
                     until = (datetime.now(timezone.utc) + timedelta(hours=STORE_PAUSE_HOURS)).isoformat()
-                    self.meta["picnic_paused_until"] = until
-                    await self._run(db.set_meta, {"picnic_paused_until": until})
-                    return (f"{str(err)[:150]} - gestopt na {done} producten; Picnic {STORE_PAUSE_HOURS} uur met rust gelaten, "
+                    self.meta[f"{store}_paused_until"] = until
+                    await self._run(db.set_meta, {f"{store}_paused_until": until})
+                    return (f"{str(err)[:150]} - gestopt na {done} producten; {STORE_PAUSE_HOURS} uur met rust gelaten, "
                             "daarna gaat het vanzelf verder")
                 await asyncio.sleep(STORE_BACKOFF * errors)
                 continue
@@ -890,67 +914,87 @@ class OrderHistory:
             await asyncio.sleep(STORE_PAUSE)
         return None
 
-    async def async_search_store(self, product_id: int, query: str | None = None) -> dict[str, Any]:
-        """Search Picnic for one of your products (by default its name without size and store brand); every result
+    async def async_search_store(self, product_id: int, query: str | None = None, store: str = compare.PICNIC) -> dict[str, Any]:
+        """Search a store for one of your products (by default its name without size and store brand); every result
         with its match score, best first. Choosing one = confirm_match."""
         product = await self._run(db.product_for_store, product_id) or {"product_id": product_id, "title": query or ""}
         query = (query or search_query(product.get("title") or "", product.get("brand")) or product.get("title") or "").strip()
-        client, err = await self._picnic()
+        client, err = await self._client(store)
         if not client:
-            return {"query": query, "items": [], "error": err or "Picnic integration not set up"}
-        found = await asyncio.wait_for(self._hass.async_add_executor_job(compare.picnic_search, client, query, 12), STORE_TIMEOUT)
+            return {"query": query, "store": store, "items": [], "error": err or f"{compare.STORE_NAMES.get(store, store)} not set up"}
+        found = await asyncio.wait_for(client.search(query, 12), STORE_TIMEOUT)
         items = [{**c, **match_score(product, c)} for c in found]
         items.sort(key=lambda c: -c["score"])
-        return {"query": query, "items": items}
+        return {"query": query, "store": store, "items": items}
 
-    async def async_confirm_match(self, product_id: int, article_id: str, confirmed: bool) -> dict[str, Any] | None:
-        """Confirm or reject the Picnic product matched to one of yours, and look again right away
+    async def async_confirm_match(self, product_id: int, article_id: str, confirmed: bool,
+                                  store: str = compare.PICNIC) -> dict[str, Any] | None:
+        """Confirm or reject the product of a store matched to one of yours, and look again right away
         (after a rejection: the next best). Returns what is matched now."""
-        await self._run(db.set_store_match, compare.PICNIC, product_id, article_id, confirmed, _now())
-        client, err = await self._picnic()
+        await self._run(db.set_store_match, store, product_id, article_id, confirmed, _now())
+        client, _err = await self._client(store)
         product = await self._run(db.product_for_store, product_id)
         if client and product:
-            matches = await self._run(db.store_matches, compare.PICNIC)
-            await self._picnic_check(client, product, matches, date.today().isoformat())
-        return ((await self._run(db.store_prices_for, [product_id])).get(product_id) or {}).get(compare.PICNIC)
+            matches = await self._run(db.store_matches, store)
+            await self._store_check(store, client, product, matches, date.today().isoformat())
+        return ((await self._run(db.store_prices_for, [product_id])).get(product_id) or {}).get(store)
 
     async def async_compare_list(self) -> dict[str, Any]:
-        """What is on the AH shopping list now, with the AH price and the price at other stores (matched on EAN).
-        Totals only over products that every compared store sells, so they compare like with like."""
+        """What is on the AH shopping list now, with the AH price and the price at the other stores. Totals per store
+        only over products that store sells, so they compare like with like: "sure" (same barcode or a confirmed
+        match) and "likely" (plus name matches; other sizes recalculated to yours)."""
         items = [i for i in await self._api.get_shopping_list() if i.get("product_id") and not i.get("checked")]
         ids = [int(i["product_id"]) for i in items]
         ah = await self._run(db.ah_prices_now, ids)
         other = await self._run(db.store_prices_for, ids)
-        guesses = await self._run(db.store_guesses, compare.PICNIC, ids)
+        stores = self.stores()
+        guesses = {s: await self._run(db.store_guesses, s, ids) for s in stores}
+        totals = {s: {"sure": {"n": 0, "ah": 0.0, "store": 0.0}, "likely": {"n": 0, "ah": 0.0, "store": 0.0}} for s in stores}
         rows = []
-        sure = {"n": 0, "ah": 0.0, compare.PICNIC: 0.0}  # same barcode, or a match you confirmed
-        likely = {"n": 0, "ah": 0.0, compare.PICNIC: 0.0}  # plus name matches (other sizes recalculated to yours)
         for i in items:
             pid, qty = int(i["product_id"]), int(i.get("quantity") or 1)
-            a, p = ah.get(pid) or {}, (other.get(pid) or {}).get(compare.PICNIC)
+            a = ah.get(pid) or {}
             row = {"product_id": pid, "title": a.get("title") or i.get("title"), "quantity": qty, "ah": a.get("price"),
-                   "ah_bonus": a.get("bonus"), "ah_size": a.get("unit_size"), "picnic": None}
-            if p and p.get("price") is not None:
-                row.update(picnic=p["price"], picnic_title=p.get("title"), picnic_unit=p.get("unit"), picnic_article=p.get("article_id"),
-                           picnic_image=p.get("image_url"),
-                           picnic_offer=bool(p.get("original_price")), match=p.get("match"), score=p.get("score"))
+                   "ah_bonus": a.get("bonus"), "ah_size": a.get("unit_size"), "stores": {}}
+            mine = parse_size(a.get("unit_size") or a.get("title"))
+            for store in stores:
+                p = (other.get(pid) or {}).get(store)
+                if not p or p.get("price") is None:
+                    if guesses[store].get(pid):
+                        row["stores"][store] = {"guess": guesses[store][pid]}
+                    continue
+                e = {"price": p["price"], "title": p.get("title"), "unit": p.get("unit"), "article_id": p.get("article_id"),
+                     "image_url": p.get("image_url"), "offer": bool(p.get("original_price")), "match": p.get("match"),
+                     "score": p.get("score"), "equiv": p["price"]}
                 # another size: what your size would cost there (per kg / litre / piece)
-                mine, theirs = parse_size(a.get("unit_size") or a.get("title")), parse_size(p.get("unit") or p.get("title"))
-                row["picnic_equiv"] = p["price"]
+                theirs = parse_size(p.get("unit") or p.get("title"))
                 if p.get("match") in ("size", "similar") and mine and theirs and mine[1] == theirs[1]:
-                    row["picnic_equiv"] = round(unit_price(p["price"], theirs) * mine[0] / (1 if mine[1] == "st" else 1000), 2)
-                    row["picnic_per_unit"], row["ah_per_unit"] = unit_price(p["price"], theirs), unit_price(a.get("price"), mine)
+                    e["equiv"] = round(unit_price(p["price"], theirs) * mine[0] / (1 if mine[1] == "st" else 1000), 2)
+                    e["per_unit"], row["ah_per_unit"] = unit_price(p["price"], theirs), unit_price(a.get("price"), mine)
                 if a.get("price") is not None:
-                    exact = p.get("match") in ("ean", "confirmed", "auto")
-                    for bucket in ((sure, likely) if exact else (likely,)):
+                    t = totals[store]
+                    for bucket in ((t["sure"], t["likely"]) if p.get("match") in ("ean", "confirmed", "auto") else (t["likely"],)):
                         bucket["n"] += 1
                         bucket["ah"] += a["price"] * qty
-                        bucket[compare.PICNIC] += row["picnic_equiv"] * qty
-            elif guesses.get(pid):
-                row["picnic_guess"] = guesses[pid]
+                        bucket["store"] += e["equiv"] * qty
+                row["stores"][store] = e
+            # the Picnic fields flat as before (Starnheim OS before 0.59)
+            if pc := row["stores"].get(compare.PICNIC):
+                if "guess" in pc:
+                    row["picnic_guess"] = pc["guess"]
+                else:
+                    row.update(picnic=pc["price"], picnic_title=pc["title"], picnic_unit=pc["unit"], picnic_article=pc["article_id"],
+                               picnic_image=pc["image_url"], picnic_offer=pc["offer"], match=pc["match"], score=pc["score"],
+                               picnic_equiv=pc["equiv"], **({"picnic_per_unit": pc["per_unit"]} if "per_unit" in pc else {}))
+            else:
+                row["picnic"] = None
             rows.append(row)
         rnd = lambda b: {k: (round(v, 2) if isinstance(v, float) else v) for k, v in b.items()}  # noqa: E731
-        return {"items": rows, "on_list": len(items), "compared": sure["n"], "totals": rnd(sure), "likely": rnd(likely),
+        by_store = {s: {k: rnd(b) for k, b in t.items()} for s, t in totals.items()}
+        old = lambda b: {"n": b["n"], "ah": b["ah"], compare.PICNIC: b["store"]}  # noqa: E731
+        pc_tot = by_store.get(compare.PICNIC) or {"sure": {"n": 0, "ah": 0, "store": 0}, "likely": {"n": 0, "ah": 0, "store": 0}}
+        return {"items": rows, "on_list": len(items), "stores": [{"id": s, "name": compare.STORE_NAMES[s]} for s in stores],
+                "by_store": by_store, "compared": pc_tot["sure"]["n"], "totals": old(pc_tot["sure"]), "likely": old(pc_tot["likely"]),
                 "picnic_connected": compare.picnic_credentials(self._hass) is not None}
 
     async def _fetch_details(self, now: str) -> bool:

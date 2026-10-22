@@ -13,6 +13,7 @@ history = importlib.import_module("albert_heijn.history")
 compare = importlib.import_module("albert_heijn.compare")
 db = importlib.import_module("albert_heijn.db")
 history.STORE_PAUSE = 0
+compare.STORES = (compare.PICNIC,)  # Jumbo has its own test
 history.REQUEST_PAUSE = 0
 
 ARTICLES = {"s9": NS(id="s9", name="Organix bio appel rijstwafeltjes", price=229, original_price=None, unit_quantity="40 gram")}

@@ -258,6 +258,8 @@ def _plain(text: str) -> str:
     """Lowercase, no accents, only letters, digits and spaces ("Crème fraîche" -> "creme fraiche")."""
     t = unicodedata.normalize("NFKD", text or "")
     t = "".join(c for c in t if not unicodedata.combining(c)).lower()
+    t = re.sub(r"(?<![\d.,])0[.,]0(?![.,]?\d)", " alcoholvrij ", t)  # "Heineken 0.0" is another product than Heineken
+    t = re.sub(r"(\w)'s", r"s", t)  # "Jumbo's" -> "jumbos", not "jumbo s"
     t = " ".join(re.sub(r"[^a-z0-9]+", " ", t).split())
     for phrase, word in _PHRASES.items():
         t = re.sub(rf"\b{phrase}\b", word, t)
@@ -326,7 +328,9 @@ _WEAK = {"echte", "echt", "original", "originele", "origineel", "classic", "klas
          "verse", "vers", "huismerk", "nieuw", "new", "luxe", "gekoeld", "pitloze", "pitloos", "romige", "romig",
          "thee", "tea", "infusion", "infusie", "vruchtensap", "patent", "kaas", "vet", "classico", "chips",
          "crackers", "cracker", "koek", "koekjes", "ijsje", "knackebrod", "schuim", "smaak", "sugar", "iets", "kleintje",
-         "originals", "premium", "gebroken", "chocoladereep", "reep"}
+         "originals", "premium", "gebroken", "chocoladereep", "reep",
+         # packaging in Jumbo's titles ("Heineken Premium Pilsener Bier Blik 6 x 330ml")
+         "bier", "blik", "blikje", "fles", "flesje", "krat", "tray", "draaidop"}
 # parts of a compound word that change the product ("half" + "volle" is not "volle")
 _QUALIFIERS = {"half", "mager", "extra", "super", "light", "licht", "dubbel", "volkoren", "wit", "witte", "bruin", "bruine",
                "zoet", "zuur", "zout", "ongezouten", "pittig", "mild", "jong", "oud", "belegen", "zero", "suikervrij", "vol"}
@@ -349,7 +353,7 @@ _PHRASES = {"rice cakes": "rijstwafel", "rice cake": "rijstwafel"}
 # numbers that make a different product: fat or sugar ("48+" vs "30+", "0%" vs "5%")
 _GRADE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(%|\+)")
 # store brands: different at every store, so the brand doesn't have to match (the product does)
-_HOUSE = {"ah", "albert", "heijn", "picnic", "excellent", "terra", "basic", "huismerk", "g&g"}
+_HOUSE = {"ah", "albert", "heijn", "picnic", "jumbo", "jumbos", "excellent", "terra", "basic", "huismerk", "g&g"}
 # AH's own brands without "AH" in the name
 _HOUSE_BRANDS = {"de zaanse hoeve", "zaanse hoeve", "streeckgenoten", "care", "beregoede"}
 MATCH_MIN_SCORE = 60  # below this a name match is not shown
@@ -449,6 +453,8 @@ def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str,
     theirs = _words(candidate.get("title") or "") - brand_words - own
     size_mine = parse_size(product.get("unit_size")) or parse_size(product.get("title"))
     size_theirs = parse_size(candidate.get("unit")) or parse_size(candidate.get("title"))
+    if size_mine == (1.0, "st") and not size_theirs:
+        size_theirs = size_mine  # loose fruit and vegetables without a size there ("Jumbo Paprika Rood"): one
     # grams and millilitres of about the same amount count as the same size (180 g vs 180 ml choco)
     if size_mine and size_theirs and {size_mine[1], size_theirs[1]} == {"g", "ml"} and             abs(size_mine[0] - size_theirs[0]) <= 0.05 * max(size_mine[0], size_theirs[0]):
         size_theirs = (size_theirs[0], size_mine[1])
@@ -510,6 +516,7 @@ def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str,
         # different fat or sugar grade: another product ("48+" vs "30+", "0%" vs "5%")
         grades_mine, grades_theirs = _grades(product.get("title")) | ({"0%"} if "0%" in mine else set()),             _grades(candidate.get("title")) | ({"0%"} if "0%" in theirs else set())
         conflict = bool(grades_mine and grades_theirs and not grades_mine & grades_theirs)
+        conflict = conflict or ("alcoholvrij" in mine) != ("alcoholvrij" in theirs)  # Heineken vs Heineken 0.0
         if conflict:
             score = min(score, 40)
     if same_dim and ratio <= 1.03:
