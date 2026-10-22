@@ -245,6 +245,12 @@ class OrderHistory:
             self.meta["matching_v3"] = _now()
             await self._run(db.set_meta, {"matching_v3": self.meta["matching_v3"]})
             _LOGGER.info("Albert Heijn: matching rules updated; %d confirmations no longer hold", n)
+        if not self.meta.get("matching_v4"):
+            # once (0.29.1): more rules from the same export; only automatic confirmations are checked again
+            await self._run(db.rescore_name_matches, compare.PICNIC)
+            await self._run(db.recheck_confirmed, compare.PICNIC, ("auto",))
+            self.meta["matching_v4"] = _now()
+            await self._run(db.set_meta, {"matching_v4": self.meta["matching_v4"]})
         if n := await self._run(db.confirm_high_scores, compare.PICNIC, AUTO_CONFIRM_SCORE, _now()):
             _LOGGER.info("Albert Heijn: %d Picnic matches with score %d+ confirmed", n, AUTO_CONFIRM_SCORE)
 

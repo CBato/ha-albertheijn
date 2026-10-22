@@ -75,15 +75,30 @@ for mine, theirs in [
     (("Mentos Gum White sweet mint", "Mentos Gum", "112.5 g"), ("Mentos White sweetmint", "112 gram • 75 stuks")),  # half the brand
     (("De Zaanse Hoeve Roomboter ongezouten", "De Zaanse Hoeve", "250 g"), ("Picnic Ongezouten roomboter", "250 gram")),  # AH brand
     (("Optimel Drinkyoghurt framboos", "Optimel", "1 l"), ("Optimel drinkyoghurt framboos 0%", "1 liter")),  # grade only there
+    (("Jozo Naturel tafelzout", "Jozo", "125 g"), ("Jozo tafelzout", "125 gram")),             # "naturel" left out
+    (("AH Pannenkoeken naturel", "AH", "8 stuks"), ("Picnic pannenkoeken", "8 stuks")),
+    (("Tuc paprika", "Tuc", "100 g"), ("Tuc Crackers Paprika", "100 gram")),                   # a category word added
+    (("Nestlé Kaktus", "Nestlé", "9 stuks"), ("Nestlé kaktus ijsje", "9 stuks")),
+    (("Aviko Supercrunch originals Hollandse friet", "Aviko", "750 g"), ("Aviko SuperCrunch Hollandse frites", "750 gram")),
+    (("AH Roma tomaten", "AH", "750 g"), ("Pruimtomaten", "750 gram")),
+    (("AH Gesneden rode uien", "AH", "150 g"), ("Picnic rode uien fijngesnipperd", "150 gram")),
+    (("AH Fijngesneden ijsbergsla", "AH", "100 g"), ("Picnic ijsbergsla fijn", "100 gram")),
 ]:
     assert score(mine, theirs) == {"score": 95, "kind": "same"}, (mine[0], score(mine, theirs))
 # likely (shown, not confirmed automatically): a brand with a shorter name there, "Original" = "Naturel"
 for mine, theirs in [
     (("Actimel Drinkyoghurt aardbei", "Actimel", "8 x 100 ml"), ("Actimel aardbei", "8 x 100 ml")),
-    (("Jozo Naturel tafelzout", "Jozo", "125 g"), ("Jozo tafelzout", "125 gram")),
     (("Pringles Original", "Pringles", "165 g"), ("Pringles Naturel", "165 gram")),
 ]:
     assert 60 <= score(mine, theirs)["score"] < 95, (mine[0], score(mine, theirs))
+# your store brand against another maker's product ("Bar le Duc ..."): their name is no extra word, but comparable at
+# most (85), never confirmed automatically
+for mine, theirs in [
+    (("AH Mineraalwater koolzuurhoudend", "AH", "1,5 l"), ("Bar le Duc mineraalwater koolzuurhoudend", "1.5 liter")),
+    (("AH Iets kruimige aardappelen", "AH", "1 kg"), ("Jongens van de Klei kruimige aardappelen", "1 kilo")),
+    (("AH Drinkyoghurt aardbei kerssmaak", "AH", "1 l"), ("Optimel drinkyoghurt aardbei kers 0%", "1 liter")),  # kerssmaak
+]:
+    assert score(mine, theirs) == {"score": 85, "kind": "same"}, (mine[0], score(mine, theirs))
 # grams vs pieces stays "similar" without the heavy weight-vs-volume penalty
 assert score(("Unox Knaks", "Unox", "400 g"), ("Unox knaks", "11 stuks")) == {"score": 90, "kind": "similar"}
 assert s.search_queries("Bolletje Echte beschuit", "Bolletje") == ["bolletje beschuit", "beschuit"]
