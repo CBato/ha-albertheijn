@@ -124,6 +124,16 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
             )
         self._open_ids = open_ids
 
+        # New products on the list or in the next order (from the AH app, a scan, voice): look them up right away
+        if self.history:
+            try:
+                ids = [i["product_id"] for i in await self.api.get_shopping_list() if i.get("product_id")]
+            except AlbertHeijnApiError as err:
+                _LOGGER.debug("Could not fetch the shopping list: %s", err)
+                ids = []
+            ids += [i.product_id for i in data.next_order_items]
+            await self.history.async_learn(ids, wait=False)
+
         # Persist refreshed tokens
         self._update_tokens()
 
@@ -181,6 +191,8 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
             return item["quantity"]
         await self.api.set_list_items([{"product_id": product_id, "title": title, "quantity": quantity}])
         self._update_tokens()
+        if self.history:
+            await self.history.async_learn([product_id], wait=False)
         return None
 
     async def async_set_list_quantity(self, product_id: int, quantity: int, title: str = "") -> None:

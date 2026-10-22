@@ -61,6 +61,7 @@ STORE_PAUSE_HOURS = 24  # after a round that stopped on errors: leave the store 
 STORE_TIMEOUT = 20  # seconds; a slow or hanging store stops this round instead of holding the sync
 STORE_BACKOFF = 30  # seconds to wait after an error (x the number of errors in a row), then go on
 STORE_MAX_ERRORS = 3  # errors in a row before stopping this round (the rest follows next time)
+LEARN_MAX = 10  # new products from the list looked up right away per round (the rest the next round)
 CATALOG_EVERY_DAYS = 7
 SUMMARY_PAGE = 25
 SUMMARY_MAX_PAGES = 40  # 1000 orders
@@ -199,6 +200,9 @@ class OrderHistory:
         self._path = hass.config.path(DB_FILE)
         self._lock = asyncio.Lock()  # one sync at a time
         self._list_lock = asyncio.Lock()  # one change of the shopping list at a time (fill / cleanup)
+        self._learn_lock = asyncio.Lock()  # one lookup of new products at a time
+        self._learned: set[int] = set()  # looked up since the start (also when nothing was found): not again
+        self._learning: set[int] = set()  # being looked up now (the app shows "looking up" and asks again)
         self._max: int | None = None  # products per heavy step in the running sync (None = the default)
         self._retry = False  # look again for products not found at other stores this week
         self.meta: dict[str, str] = {}
@@ -341,6 +345,8 @@ class OrderHistory:
     async def async_product_history(self, product_id: int) -> dict[str, Any]:
         """Details, all purchases, weekly prices and the rhythm of one product."""
         data = await self._run(db.product_history, product_id)
+        # new to us (just put on the list, never bought): look it up now, in the background; the app asks again
+        data["learning"] = await self.async_learn([product_id], wait=False) or product_id in self._learning
         rhythm = next((p for p in self._frequent if p.get("product_id") == product_id), None)
         purchases = data["purchases"]
         spent = [p["amount"] for p in purchases if p.get("amount") is not None]
@@ -715,6 +721,70 @@ class OrderHistory:
             mapping = await self._api.convert_pos_ids(unmapped)
             await self._run(db.save_pos_map, mapping)
         return bool(new) or bool(unmapped)
+
+    async def async_learn(self, product_ids: list[int], wait: bool = True) -> bool:
+        """Products new to us (on the list, never bought): fetch their details and AH price, their EAN and the match at
+        Picnic right away instead of waiting for the nightly rounds. Each product once per start. With wait=False the
+        lookup runs in the background. Returns whether there was something to look up."""
+        ids = [int(i) for i in product_ids if i and int(i) not in self._learned]
+        if not ids:
+            return False
+        picnic = compare.PICNIC if compare.picnic_entry(self._hass) else None
+        todo = await self._run(db.to_learn, ids, picnic)
+        ids = list(dict.fromkeys(todo["details"] + todo["gtin"] + todo["store"]))[:LEARN_MAX]
+        missing = set(todo["details"] + todo["gtin"] + todo["store"])
+        self._learned.update(int(i) for i in product_ids if i and int(i) not in missing)  # nothing missing: done
+        if not ids:
+            return False
+        self._learning.update(ids)
+        if not wait:
+            self._hass.async_create_background_task(self._learn(ids, todo), "albert_heijn_learn")
+            return True
+        await self._learn(ids, todo)
+        return True
+
+    async def _learn(self, ids: list[int], todo: dict[str, list[int]]) -> None:
+        try:
+            await self._learn_now(ids, todo)
+        finally:
+            self._learning.difference_update(ids)
+
+    async def _learn_now(self, ids: list[int], todo: dict[str, list[int]]) -> None:
+        async with self._learn_lock:
+            ids = [i for i in ids if i not in self._learned]
+            self._learned.update(ids)
+            if not ids:
+                return
+            now, today = _now(), date.today().isoformat()
+            try:
+                if details := [i for i in ids if i in todo["details"]]:
+                    rows = await self._api.get_prices(details)
+                    for r in rows:
+                        r["effective"] = effective_price(r.get("bonus"), r.get("price"), r.get("price_before_bonus"))
+                    await self._run(db.save_prices, today, rows)
+                    await self._run(db.fill_product_details, rows, now)
+                    await self._run(db.mark_details_tried, details, now)
+                for pid in (i for i in ids if i in todo["gtin"]):
+                    await asyncio.sleep(REQUEST_PAUSE)
+                    await self._run(db.save_gtins, pid, await self._api.get_product_gtins(pid), now)
+            except AlbertHeijnApiError as err:
+                _LOGGER.debug("Looking up new products at AH failed: %s", err)
+            if not (store := [i for i in ids if i in todo["store"]]) or (self.meta.get("picnic_paused_until") or "") > now:
+                return
+            client, err = await self._picnic()
+            if not client:
+                return
+            matches = await self._run(db.store_matches, compare.PICNIC)
+            for pid in store:
+                if product := await self._run(db.product_for_store, pid):
+                    if not product.get("gtins") and not product.get("title"):
+                        continue
+                    try:
+                        await self._picnic_check(client, product, matches, today)
+                    except Exception as err:  # noqa: BLE001 - see _fetch_picnic; the nightly round tries again
+                        _LOGGER.debug("Picnic check of new product %s failed: %s", pid, err)
+                        return
+                    await asyncio.sleep(STORE_PAUSE)
 
     async def _fetch_gtins(self, now: str) -> int:
         """Look up the EAN of bought products that don't have one yet (each at most once every GTIN_EVERY_DAYS)."""

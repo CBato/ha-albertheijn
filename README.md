@@ -135,6 +135,7 @@ Orders (from the original integration): "wat zit er in mijn bestelling", "wannee
 | Bonus this week and next week | Once a day (the first sync of the day) | Per week |
 | EAN (barcode) of the products you buy | Every sync, for products without one | Each product at most once a week while AH doesn't give one |
 | Prices at Picnic (with the Picnic integration) | Weekly per product | Matched: only the price of the matched article (1 request). New: barcode, else name. Not found: again after 4 weeks |
+| A product new to you on the shopping list or in the next order (also from the AH app), or opened with `get_product_history` | Right away (every 5 minutes, in the background) | Details, AH price, EAN and the Picnic match; each product once, at most 10 per round. After that the weekly rounds take over once you buy it |
 | Missing product details (title, category, image) | Every sync, for products that lack them | Each product at most once a week; products AH no longer sells online show the name from the till receipt |
 
 After a restart and after a delivery only a light sync runs (orders, receipts, bonus), so Home Assistant stays

@@ -850,6 +850,33 @@ def save_gtins(path: str, product_id: int, gtins: list[str], now: str) -> None:
                     (",".join(gtins), now, product_id))
 
 
+def to_learn(path: str, product_ids: list[int], store: str | None) -> dict[str, list[int]]:
+    """Of these products (on your list or opened in the app, maybe never bought): which still need their details and
+    AH price ("details"), their EAN ("gtin") and a check at the other store ("store"; None = no other store). Each is
+    tried once; after that the normal weekly rounds take over (for products you bought)."""
+    out: dict[str, list[int]] = {"details": [], "gtin": [], "store": []}
+    ids = list(dict.fromkeys(int(i) for i in product_ids if i))
+    if not ids:
+        return out
+    marks = ",".join("?" * len(ids))
+    with closing(_connect(path)) as con:
+        rows = {r["product_id"]: r for r in con.execute(
+            f"""SELECT p.product_id, p.title, p.details_tried, p.gtin, p.gtin_tried,
+                       (SELECT COUNT(*) FROM prices x WHERE x.product_id = p.product_id) AS prices,
+                       (SELECT COUNT(*) FROM store_prices s WHERE s.product_id = p.product_id AND s.store = ?) AS checks
+                FROM products p WHERE p.product_id IN ({marks})""", [store or "", *ids])}
+    for pid in ids:
+        r = rows.get(pid)
+        if not r or (not r["prices"] and not r["details_tried"]) or (
+                (not r["title"] or r["title"].startswith("Product ")) and not r["details_tried"]):
+            out["details"].append(pid)
+        if not r or (not r["gtin"] and not r["gtin_tried"]):
+            out["gtin"].append(pid)
+        if store and (not r or not r["checks"]):
+            out["store"].append(pid)
+    return out
+
+
 def store_due(path: str, store: str, checked_before: str, limit: int, retry_not_found: bool = False,
               not_found_before: str | None = None) -> list[dict[str, Any]]:
     """Bought products to check at a store: product_id, gtins (up to 3), title, brand, unit_size, and the last check
