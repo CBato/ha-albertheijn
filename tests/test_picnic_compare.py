@@ -15,6 +15,9 @@ compare = importlib.import_module("albert_heijn.compare")
 db = importlib.import_module("albert_heijn.db")
 history.STORE_PAUSE = 0
 compare.STORES = (compare.PICNIC,)  # Jumbo has its own test
+# the test runs on 22 Oct 2026 (store_due counts weeks from "today")
+TODAY = type("D", (date,), {"today": staticmethod(lambda: date(2026, 10, 22))})
+history.date = TODAY
 history.AUTO_CONFIRM_SCORE = 101  # first without auto-confirm; checked separately at the end
 
 # your products: 1 branded with EAN, 2 Calvé without EAN at Picnic (other size there), 3 store brand
@@ -130,7 +133,7 @@ async def main():
     next_week = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
     history.date = type("D", (date,), {"today": staticmethod(lambda: date.fromisoformat(next_week))})
     assert await h._fetch_store("picnic", next_week) is None
-    history.date = date
+    history.date = TODAY
     assert FakePicnic.calls == n + 2 and FakePicnic.article_calls == a + 2, (FakePicnic.calls - n, FakePicnic.article_calls - a)
     assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["match"] == "size"  # kind and score kept
 

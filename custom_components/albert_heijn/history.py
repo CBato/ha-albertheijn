@@ -976,7 +976,7 @@ class OrderHistory:
         for i in items:
             pid, qty = int(i["product_id"]), int(i.get("quantity") or 1)
             a = ah.get(pid) or {}
-            row = {"product_id": pid, "title": a.get("title") or i.get("title"), "quantity": qty, "ah": a.get("price"),
+            row = {"product_id": pid, "title": a.get("title") or i.get("title"), "quantity": qty, "ah": a.get("price"), "ah_normal": a.get("normal"),
                    "ah_bonus": a.get("bonus"), "ah_size": a.get("unit_size"), "stores": {}}
             mine = parse_size(a.get("unit_size") or a.get("title"))
             for store in stores:
@@ -987,11 +987,13 @@ class OrderHistory:
                     continue
                 e = {"price": p["price"], "title": p.get("title"), "unit": p.get("unit"), "article_id": p.get("article_id"),
                      "image_url": p.get("image_url"), "offer": bool(p.get("original_price")), "match": p.get("match"),
-                     "score": p.get("score"), "equiv": p["price"]}
+                     "score": p.get("score"), "equiv": p["price"], "original_price": p.get("original_price")}
                 # another size: what your size would cost there (per kg / litre / piece)
                 theirs = parse_size(p.get("unit") or p.get("title"))
                 if p.get("match") in ("size", "similar") and mine and theirs and mine[1] == theirs[1]:
                     e["equiv"] = round(unit_price(p["price"], theirs) * mine[0] / (1 if mine[1] == "st" else 1000), 2)
+                    if p.get("original_price"):
+                        e["normal_equiv"] = round(e["equiv"] * p["original_price"] / p["price"], 2)
                     e["per_unit"], row["ah_per_unit"] = unit_price(p["price"], theirs), unit_price(a.get("price"), mine)
                 if a.get("price") is not None:
                     t = totals[store]

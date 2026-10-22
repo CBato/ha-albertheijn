@@ -974,11 +974,12 @@ def ah_prices_now(path: str, product_ids: list[int]) -> dict[int, dict[str, Any]
     marks = ",".join("?" * len(product_ids))
     with closing(_connect(path)) as con:
         for r in con.execute(
-            f"""SELECT x.product_id, x.price, x.effective, x.bonus, p.title, p.unit_size FROM prices x
+            f"""SELECT x.product_id, x.price, x.price_before_bonus, x.effective, x.bonus, p.title, p.unit_size FROM prices x
                 JOIN (SELECT product_id, MAX(date) AS d FROM prices WHERE product_id IN ({marks}) GROUP BY product_id) l
                   ON l.product_id = x.product_id AND l.d = x.date
                 LEFT JOIN products p ON p.product_id = x.product_id""", product_ids):
             out[r["product_id"]] = {"price": r["effective"] if r["effective"] is not None else r["price"],
+                                    "normal": (r["price_before_bonus"] or r["price"]) if r["bonus"] else r["price"],
                                     "bonus": r["bonus"], "title": r["title"], "unit_size": r["unit_size"]}
         return out
 
