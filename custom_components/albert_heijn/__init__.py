@@ -37,14 +37,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.history.async_load()
     await coordinator.async_config_entry_first_refresh()
 
-    # Order history, receipts, catalog, prices and bonus: shortly after start, then every night (and when an order
-    # is delivered, see coordinator). Each step only fetches what is new or due. The basket and the next order are
-    # live (coordinator, every minute).
-    async def _sync(_now=None) -> None:
+    # Shortly after start (and after a delivery, see coordinator) a light sync: new orders, receipts, bonus.
+    # Every night the heavy part too: catalog, prices, product details, EAN codes, other stores (each when due, a
+    # limited number per night). The basket and the next order are live (coordinator, every 5 minutes).
+    async def _light_sync(_now=None) -> None:
+        await coordinator.async_sync_history(heavy=False)
+
+    async def _nightly_sync(_now=None) -> None:
         await coordinator.async_sync_history()
 
-    entry.async_on_unload(async_call_later(hass, 90, _sync))
-    entry.async_on_unload(async_track_time_change(hass, _sync, hour=4, minute=15, second=0))
+    entry.async_on_unload(async_call_later(hass, 90, _light_sync))
+    entry.async_on_unload(async_track_time_change(hass, _nightly_sync, hour=4, minute=15, second=0))
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 

@@ -120,7 +120,7 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
         open_ids = {f.order_id for f in fulfillments}
         if self._open_ids is not None and self._open_ids - open_ids and self.history:
             self.config_entry.async_create_background_task(
-                self.hass, self.async_sync_history(), "albert_heijn_history_sync"
+                self.hass, self.async_sync_history(heavy=False), "albert_heijn_history_sync"
             )
         self._open_ids = open_ids
 
@@ -197,13 +197,13 @@ class AlbertHeijnCoordinator(DataUpdateCoordinator[AlbertHeijnData]):
         self._update_tokens()
         return result
 
-    async def async_sync_history(self, refresh_catalog: bool = False) -> bool:
+    async def async_sync_history(self, refresh_catalog: bool = False, heavy: bool = True) -> bool:
         """Update the stored order history and notify the sensors."""
         if not self.history:
             return False
         open_orders = self.data.fulfillments if self.data else []
         try:
-            changed = await self.history.async_sync(open_orders, refresh_catalog)
+            changed = await self.history.async_sync(open_orders, refresh_catalog, heavy=heavy)
         except AlbertHeijnAuthError:
             _LOGGER.warning("Albert Heijn: order history sync needs a new login")
             return False

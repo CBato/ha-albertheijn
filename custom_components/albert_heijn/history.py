@@ -45,12 +45,13 @@ PRICE_EVERY_DAYS = 7  # weekly price check
 PRICE_MAX_PRODUCTS = 2000
 PRICE_BATCH = 30
 DETAILS_EVERY_DAYS = 7  # a product without title/category/image is looked up at AH at most once a week
-DETAILS_MAX = 1000  # per sync
+DETAILS_MAX = 150  # per sync (the first time spread over a few nights)
 GTIN_EVERY_DAYS = 7  # an EAN AH doesn't give is asked again at most once a week
-GTIN_MAX = 800  # per sync
+GTIN_MAX = 150  # per sync
 STORE_EVERY_DAYS = 7  # prices at other stores: weekly
-STORE_MAX = 800  # per sync
-STORE_PAUSE = 0.5  # seconds between requests to another store
+STORE_MAX = 150  # per sync
+STORE_PAUSE = 1.0  # seconds between requests to another store
+STORE_TIMEOUT = 20  # seconds; a slow or hanging store stops this round instead of holding the sync
 CATALOG_EVERY_DAYS = 7
 SUMMARY_PAGE = 25
 SUMMARY_MAX_PAGES = 40  # 1000 orders
@@ -411,9 +412,14 @@ class OrderHistory:
         return {"removed": [s["title"] for s in remove], "kept": len(stale) - len(done), "dry_run": dry_run}
 
     async def async_sync(
-        self, open_orders: list[Fulfillment], refresh_catalog: bool = False, refresh_prices: bool = False
+        self, open_orders: list[Fulfillment], refresh_catalog: bool = False, refresh_prices: bool = False, heavy: bool = True
     ) -> bool:
-        """Fetch new delivered orders, the catalog and prices (each when due). Returns True if anything changed."""
+        """Fetch new delivered orders, receipts and bonus; with heavy also the catalog, prices, product details, EAN
+        codes and other stores (each when due, a limited number per run). Returns True if anything changed.
+
+        Light runs (after a restart, after a delivery) keep Home Assistant responsive while it is busy; the heavy
+        part runs at night or when asked for (sync_history, fill_list).
+        """
         if self._lock.locked():
             return False
         async with self._lock:
@@ -477,7 +483,7 @@ class OrderHistory:
                 changed = True
 
             # 3. AH "Eerder gekocht" catalog, weekly
-            if refresh_catalog or _older_than(self.meta.get("catalog_at"), CATALOG_EVERY_DAYS):
+            if heavy and (refresh_catalog or _older_than(self.meta.get("catalog_at"), CATALOG_EVERY_DAYS)):
                 try:
                     catalog: list[dict[str, Any]] = []
                     page, pages = 0, 1
@@ -514,7 +520,7 @@ class OrderHistory:
             await self._refresh_cache()
 
             # 5. Weekly price check for everything we buy (history first, then the catalog)
-            if refresh_catalog or refresh_prices or _older_than(self.meta.get("prices_at"), PRICE_EVERY_DAYS):
+            if refresh_prices or (heavy and (refresh_catalog or _older_than(self.meta.get("prices_at"), PRICE_EVERY_DAYS))):
                 got, err = await self._fetch_prices(today)
                 if err:
                     errors.append(f"Prijzen: {err}")
@@ -522,26 +528,27 @@ class OrderHistory:
                     self.meta["prices_at"] = now
                     changed = True
 
-            # 6. Missing product details (title, category, image), e.g. for products only known from a till receipt;
-            #    what the price check just looked up is skipped
-            try:
-                if await self._fetch_details(now):
-                    changed = True
-            except AlbertHeijnApiError as err:
-                _LOGGER.debug("Product details not available: %s", err)
-                errors.append(f"Productgegevens: {err}")
+            if heavy:
+                # 6. Missing product details (title, category, image), e.g. for products only known from a till receipt;
+                #    what the price check just looked up is skipped
+                try:
+                    if await self._fetch_details(now):
+                        changed = True
+                except AlbertHeijnApiError as err:
+                    _LOGGER.debug("Product details not available: %s", err)
+                    errors.append(f"Productgegevens: {err}")
 
-            # 7. EAN codes of the products you buy (to find them at other stores)
-            try:
-                await self._fetch_gtins(now)
-            except AlbertHeijnApiError as err:
-                _LOGGER.debug("EAN codes not available: %s", err)
-                errors.append(f"EAN: {err}")
+                # 7. EAN codes of the products you buy (to find them at other stores)
+                try:
+                    await self._fetch_gtins(now)
+                except AlbertHeijnApiError as err:
+                    _LOGGER.debug("EAN codes not available: %s", err)
+                    errors.append(f"EAN: {err}")
 
-            # 8. The same products at Picnic, matched on EAN (only with the Picnic integration of Home Assistant)
-            if err_picnic := await self._fetch_picnic(today, now):
-                errors.append(f"Picnic: {err_picnic}")
-            self.store_counts = await self._run(db.store_counts)
+                # 8. The same products at Picnic (only with the Picnic integration of Home Assistant)
+                if err_picnic := await self._fetch_picnic(today, now):
+                    errors.append(f"Picnic: {err_picnic}")
+                self.store_counts = await self._run(db.store_counts)
 
             self.meta["synced_at"] = now
             await self._run(db.set_meta, self.meta)
@@ -677,7 +684,11 @@ class OrderHistory:
     async def _picnic_check(self, client, product: dict[str, Any], matches: dict[int, dict[str, Any]], today: str) -> None:
         """Find one product at Picnic: the confirmed article, else the same barcode, else the best match by name
         and size (never a rejected one). Saves the result, also "not found"."""
-        pid, job = product["product_id"], self._hass.async_add_executor_job
+        pid = product["product_id"]
+
+        async def job(func, *args):
+            return await asyncio.wait_for(self._hass.async_add_executor_job(func, *args), STORE_TIMEOUT)
+
         m = matches.get(pid) or {"confirmed": None, "rejected": set()}
         found = None
         if m["confirmed"]:

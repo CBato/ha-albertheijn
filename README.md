@@ -127,7 +127,10 @@ Orders (from the original integration): "wat zit er in mijn bestelling", "wannee
 | Prices at Picnic (with the Picnic integration) | Weekly per product | Only products with an EAN, each once a week |
 | Missing product details (title, category, image) | Every sync, for products that lack them | Each product at most once a week; products AH no longer sells online show the name from the till receipt |
 
-There is one sync at a time. Each step that fails is skipped and reported in `last_error` on the "Vaak besteld"
+After a restart and after a delivery only a light sync runs (orders, receipts, bonus), so Home Assistant stays
+responsive while it is busy. Catalog, prices, product details, EAN codes and other stores run at night (or with
+`sync_history`), at most 150 products per step per run: the first big round is spread over a few nights. There is
+one sync at a time. Each step that fails is skipped and reported in `last_error` on the "Vaak besteld"
 sensor; the rest of the sync continues.
 
 ### Sources and how far back
