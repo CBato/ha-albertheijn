@@ -166,6 +166,10 @@ SEARCH_STORE_SCHEMA = vol.Schema(
      vol.Optional(ATTR_STORE, default=PICNIC): vol.In(STORES)}
 )
 
+COMPARE_LIST_SCHEMA = vol.Schema({vol.Optional("items"): [vol.Schema(
+    {vol.Required(ATTR_PRODUCT_ID): vol.Coerce(int), vol.Optional("quantity", default=1): vol.Coerce(int)},
+    extra=vol.ALLOW_EXTRA)]})
+
 GET_BONUS_SCHEMA = vol.Schema({vol.Optional("week", default="current"): vol.In(["current", "next"])})
 
 GET_INSIGHTS_SCHEMA = vol.Schema({vol.Optional("weeks", default=12): vol.All(vol.Coerce(int), vol.Range(min=4, max=52))})
@@ -315,7 +319,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     async def handle_compare_list(call: ServiceCall) -> ServiceResponse:
         """The AH shopping list with the price at AH and at other stores (matched on EAN)."""
         try:
-            return await _get_history(hass).async_compare_list()
+            coordinator = _get_coordinator(hass)
+            in_order = [{"product_id": i.product_id, "quantity": i.quantity, "title": i.title}
+                        for i in (coordinator.data.next_order_items if coordinator.data else [])]
+            return await _get_history(hass).async_compare_list(call.data.get("items"), in_order)
         except AlbertHeijnApiError as err:
             raise HomeAssistantError(f"Compare failed: {err}") from err
 
@@ -459,6 +466,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_COMPARE_LIST,
         handle_compare_list,
+        schema=COMPARE_LIST_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
 

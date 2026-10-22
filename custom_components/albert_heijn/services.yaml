@@ -329,6 +329,14 @@ compare_list:
   description: >-
     The products on the AH shopping list with the AH price now and the price at Picnic (matched on EAN, needs the
     Picnic integration of Home Assistant). Totals only over products both stores sell.
+  fields:
+    items:
+      name: Products
+      description: >-
+        Optional: the products to compare, as a list of product_id and quantity. Default the AH shopping list; while
+        an order is open for changes (AH "order mode") the products of that order.
+      selector:
+        object:
 
 set_list_quantity:
   name: Set quantity on the shopping list

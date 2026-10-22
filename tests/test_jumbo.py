@@ -140,6 +140,25 @@ async def main():
     sure = c["by_store"]["jumbo"]["sure"]
     assert sure == {"n": 3, "ah": round(4.99 + 0.95 * 3 + 7.49, 2), "store": round(4.75 + 0.79 * 3 + 6.99, 2)}, sure
 
+    # AH in "order mode" (an order open for changes): the shopping list gives 412 -> the products of that order
+    api_error = importlib.import_module("albert_heijn.api").AlbertHeijnApiError
+    real_list = FakeApi.get_shopping_list
+
+    async def order_mode(self):
+        raise api_error('API request failed: 412 - {"message":"Server in order mode"}', 412)
+    FakeApi.get_shopping_list = order_mode
+    c = await h.async_compare_list(None, [{"product_id": 1, "quantity": 2}])
+    assert c["source"] == "order" and [r["product_id"] for r in c["items"]] == [1] and c["items"][0]["quantity"] == 2, c
+    try:
+        await h.async_compare_list()  # no order to fall back on: the error stays
+        raise AssertionError("412 without an order must raise")
+    except api_error:
+        pass
+    # the list as the app shows it: no request to AH at all
+    c = await h.async_compare_list([{"product_id": 2, "quantity": 3}])
+    assert c["source"] == "app" and c["items"][0]["stores"]["jumbo"]["price"] == 0.79, c
+    FakeApi.get_shopping_list = real_list
+
     # search and confirm by hand at Jumbo
     res = await h.async_search_store(1, "calve pindakaas", "jumbo")
     assert res["store"] == "jumbo" and res["items"][0]["article_id"] == "216435STK" and res["items"][0]["score"] >= 90, res
