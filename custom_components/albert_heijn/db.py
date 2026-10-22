@@ -1019,6 +1019,13 @@ def unconfirm_other_sizes(path: str, store: str) -> int:
                JOIN (SELECT product_id, MAX(date) AS d FROM store_prices WHERE store = ? GROUP BY product_id) x
                  ON x.product_id = s.product_id AND x.d = s.date
                WHERE m.store = ? AND m.status = 'confirmed'""", (store, store))]
+        # the latest check per product, decided before anything is removed (at most one row per product goes)
+        loose = {r["product_id"]: r["date"] for r in con.execute(
+            """SELECT s.product_id, s.date FROM store_prices s
+               JOIN (SELECT product_id, MAX(date) AS d FROM store_prices WHERE store = ? GROUP BY product_id) x
+                 ON x.product_id = s.product_id AND x.d = s.date
+               WHERE s.store = ? AND s.match IN ('size', 'similar')""", (store, store))}
+        handled = set()
         for r in rows:
             mine = parse_size(r["unit_size"]) or parse_size(r["title"])
             theirs = parse_size(r["unit"]) or parse_size(r["their_title"])
@@ -1026,10 +1033,11 @@ def unconfirm_other_sizes(path: str, store: str) -> int:
                 con.execute("DELETE FROM store_matches WHERE store = ? AND product_id = ? AND article_id = ?",
                             (store, r["product_id"], r["article_id"]))
                 con.execute("DELETE FROM store_prices WHERE store = ? AND product_id = ? AND date = ?", (store, r["product_id"], r["date"]))
+                handled.add(r["product_id"])
                 out += 1
         # unconfirmed matches in another size or similar: look for them again too (the same size may exist)
-        out += con.execute(
-            """DELETE FROM store_prices WHERE store = ? AND match IN ('size', 'similar')
-                 AND date = (SELECT MAX(date) FROM store_prices s2 WHERE s2.store = store_prices.store AND s2.product_id = store_prices.product_id)""",
-            (store,)).rowcount
+        for pid, day in loose.items():
+            if pid not in handled:
+                con.execute("DELETE FROM store_prices WHERE store = ? AND product_id = ? AND date = ?", (store, pid, day))
+                out += 1
     return out
