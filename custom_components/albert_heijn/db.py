@@ -848,18 +848,20 @@ def save_gtins(path: str, product_id: int, gtins: list[str], now: str) -> None:
                     (",".join(gtins), now, product_id))
 
 
-def store_due(path: str, store: str, checked_before: str, limit: int) -> list[dict[str, Any]]:
+def store_due(path: str, store: str, checked_before: str, limit: int, retry_not_found: bool = False) -> list[dict[str, Any]]:
     """Bought products not checked at a store since checked_before: product_id, gtin (first, or None), title, brand,
-    unit_size. With a title, so products without an EAN can be found by name."""
+    unit_size. With a title, so products without an EAN can be found by name. retry_not_found: also products that
+    were checked but not found (e.g. after the matching got better)."""
+    found_only = "AND s.article_id IS NOT NULL" if retry_not_found else ""
     with closing(_connect(path)) as con:
         return [
-            {"product_id": r["product_id"], "gtin": (r["gtin"] or "").split(",")[0] or None, "title": r["title"],
+            {"product_id": r["product_id"], "gtins": [g for g in (r["gtin"] or "").split(",") if g][:3], "title": r["title"],
              "brand": r["brand"], "unit_size": r["unit_size"]}
             for r in con.execute(
                 f"""SELECT p.product_id, p.gtin, p.title, p.brand, p.unit_size FROM products p
                     JOIN ({_bought_ids_sql()}) ids ON ids.id = p.product_id
                     WHERE ((p.gtin IS NOT NULL AND p.gtin != '') OR (p.title IS NOT NULL AND p.title != '' AND p.title NOT LIKE 'Product %'))
-                      AND NOT EXISTS (SELECT 1 FROM store_prices s WHERE s.store = ? AND s.product_id = p.product_id AND s.date >= ?)
+                      AND NOT EXISTS (SELECT 1 FROM store_prices s WHERE s.store = ? AND s.product_id = p.product_id AND s.date >= ? {found_only})
                     LIMIT ?""", (store, checked_before, limit))
         ]
 
@@ -941,5 +943,5 @@ def product_for_store(path: str, product_id: int) -> dict[str, Any] | None:
         r = con.execute("SELECT product_id, gtin, title, brand, unit_size FROM products WHERE product_id = ?", (product_id,)).fetchone()
     if not r:
         return None
-    return {"product_id": r["product_id"], "gtin": (r["gtin"] or "").split(",")[0] or None, "title": r["title"],
+    return {"product_id": r["product_id"], "gtins": [g for g in (r["gtin"] or "").split(",") if g][:3], "title": r["title"],
             "brand": r["brand"], "unit_size": r["unit_size"]}

@@ -302,7 +302,18 @@ _UNITS = {"kg": (1000, "g"), "kilo": (1000, "g"), "g": (1, "g"), "gr": (1, "g"),
           "l": (1000, "ml"), "lt": (1000, "ml"), "ltr": (1000, "ml"), "liter": (1000, "ml"), "cl": (10, "ml"),
           "ml": (1, "ml"), "st": (1, "st"), "stuk": (1, "st"), "stuks": (1, "st"), "stück": (1, "st")}
 _UNIT_RE = "|".join(sorted(_UNITS, key=len, reverse=True))
-_SIZE_WORDS = set(_UNITS) | {"x", "per", "ca", "circa", "stuk", "pak", "fles", "blik", "pot", "doos", "zak"}
+_SIZE_WORDS = set(_UNITS) | {"x", "per", "ca", "circa", "stuk", "pak", "fles", "blik", "pot", "doos", "zak", "los", "kilo",
+                              # packaging: the size says it already ("grootverpakking" 500 g vs 500 g)
+                              "grootverpakking", "voordeelverpakking", "voordeelpak", "familieverpakking", "multipack",
+                              "verpakking", "navulverpakking", "navulling", "voordeel", "bulk", "xl", "xxl", "maxi", "mega"}
+# words that say little about what the product is ("Bolletje Echte beschuit" = "Bolletje beschuit")
+_WEAK = {"echte", "echt", "original", "originele", "origineel", "classic", "klassiek", "klassieke", "lekker", "heerlijke",
+         "verse", "vers", "huismerk", "nieuw", "new"}
+# parts of a compound word that change the product ("half" + "volle" is not "volle")
+_QUALIFIERS = {"half", "mager", "extra", "super", "light", "licht", "dubbel", "volkoren", "wit", "witte", "bruin", "bruine",
+               "zoet", "zuur", "zout", "ongezouten", "pittig", "mild", "jong", "oud", "belegen", "zero", "suikervrij", "vol"}
+# the same word written differently
+_SYNONYMS = {"biologisch": "bio", "biologische": "bio", "organic": "bio", "eko": "bio"}
 # store brands: different at every store, so the brand doesn't have to match (the product does)
 _HOUSE = {"ah", "albert", "heijn", "picnic", "excellent", "terra", "basic", "huismerk", "g&g"}
 MATCH_MIN_SCORE = 60  # below this a name match is not shown
@@ -315,9 +326,14 @@ def parse_size(text: str | None) -> tuple[float, str] | None:
     if m := re.search(rf"(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*({_UNIT_RE})\b", t):
         factor, dim = _UNITS[m[3]]
         return round(int(m[1]) * float(m[2]) * factor, 3), dim
-    if m := re.search(rf"(\d+(?:\.\d+)?)\s*({_UNIT_RE})\b", t):
-        factor, dim = _UNITS[m[2]]
-        return round(float(m[1]) * factor, 3), dim
+    found = [(round(float(m[1]) * _UNITS[m[2]][0], 3), _UNITS[m[2]][1]) for m in re.finditer(rf"(\d+(?:\.\d+)?)\s*({_UNIT_RE})\b", t)]
+    # "1 stuk (ca. 800 gram)": the weight says more than the piece
+    if found:
+        return next((f for f in found if f[1] != "st"), found[0])
+    if re.search(r"\bper (kilo|kg)\b", t):
+        return 1000.0, "g"  # sold by weight: the price is per kilo
+    if re.search(r"\bper (liter|l)\b", t):
+        return 1000.0, "ml"
     if re.search(r"\bper stuk\b", t):
         return 1.0, "st"
     return None
@@ -331,9 +347,12 @@ def unit_price(price: float | None, size: tuple[float, str] | None) -> float | N
     return round(price / amount * (1 if dim == "st" else 1000), 3)
 
 
+def _keep(word: str) -> bool:
+    return word not in _SIZE_WORDS and word not in _FILLER and word not in _HOUSE and word not in _WEAK and not any(c.isdigit() for c in word)
+
+
 def _words(text: str) -> set[str]:
-    return {_stem(w) for w in _plain(text).split()
-            if w not in _SIZE_WORDS and w not in _FILLER and w not in _HOUSE and not any(c.isdigit() for c in w)}
+    return {_stem(_SYNONYMS.get(w, w)) for w in _plain(text).split() if _keep(w)}
 
 
 def is_house_brand(brand: str | None) -> bool:
@@ -342,10 +361,23 @@ def is_house_brand(brand: str | None) -> bool:
 
 
 def search_query(title: str, brand: str | None = None) -> str:
-    """What to search for at another store: the product name without size and without the store brand."""
-    words = [w for w in _plain(title).split()
-             if w not in _SIZE_WORDS and w not in _HOUSE and not any(c.isdigit() for c in w)]
-    return " ".join(words)
+    """What to search for at another store: the product name without size, packaging and store brand."""
+    return " ".join(_SYNONYMS.get(w, w) for w in _plain(title).split() if _keep(w))
+
+
+def search_queries(title: str, brand: str | None = None) -> list[str]:
+    """Searches to try, from precise to broad: the whole name; for a brand: brand + the longest word; the first word
+    ("andijvie fijngesneden" -> "andijvie"). Store search engines often find nothing for a long exact name."""
+    full = search_query(title, brand)
+    words = full.split()
+    brand_words = [w for w in _plain(brand or "").split() if _keep(w)] if not is_house_brand(brand) else []
+    rest = [w for w in words if w not in brand_words and w not in _SYNONYMS.values()]
+    out = [full]
+    if rest:
+        longest = max(rest, key=len)
+        out.append(" ".join(brand_words + [longest]) if brand_words else longest)
+        out.append(rest[0])
+    return [q for i, q in enumerate(out) if q and q not in out[:i]]
 
 
 def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
@@ -364,17 +396,24 @@ def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str,
         return {"score": 0, "kind": "similar"}
 
     def found(word: str, others: set[str]) -> bool:
-        """A word also counts when it is part of a longer word ("scharrel" in "scharreleieren")."""
-        return word in others or (len(word) >= 3 and any(word in o for o in others))
+        """A word also counts when it is part of a longer word, either way ("scharrel" / "scharreleieren",
+        "slamelange" / "melange")."""
+        def inside(short: str, long: str) -> bool:
+            if len(short) < 3 or short not in long:
+                return False
+            rest = long.replace(short, "", 1)
+            return len(rest) < 2 or rest not in _QUALIFIERS
+
+        return word in others or any(inside(word, o) or (len(o) >= 4 and inside(o, word)) for o in others)
 
     def compact(text: str) -> str:
-        return "".join(w for w in _plain(text).split() if w not in _HOUSE and w not in _FILLER and not any(c.isdigit() for c in w))
+        return "".join(_SYNONYMS.get(w, w) for w in _plain(text).split() if _keep(w))
 
     if compact(product.get("title") or "").replace(compact(product.get("brand") or ""), "") ==             compact(candidate.get("title") or "").replace(compact(product.get("brand") or ""), ""):
         hits, extra = len(mine), 0  # same words, only written apart or together ("scharrel eieren" / "scharreleieren")
     else:
         hits = sum(found(w, theirs) for w in mine)
-        extra = sum(not found(w, mine) and not any(m in w for m in mine if len(m) >= 3) for w in theirs)
+        extra = sum(not found(w, mine) for w in theirs)
     score = 100 * (0.65 * hits / len(mine) + 0.35 * hits / (len(mine) + extra))
     if branded:
         # a branded product must be the same brand there

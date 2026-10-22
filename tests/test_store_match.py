@@ -34,6 +34,16 @@ assert score(("AH Pindakaas met stukjes", "AH", "350 g"), ("Picnic pindakaas", "
 # pieces vs weight: similar, can't recalculate
 assert score(("AH Bananen", "AH", "5 stuks"), ("Picnic bananen", "1 kg"))["kind"] == "similar"
 
+# real examples: bio = biologisch, packaging words, compound words, weak adjectives, "per kilo" vs "ca. 800 gram"
+assert score(("AH Biologisch Pompoen", "AH Biologisch", "los per kilo"), ("Bio pompoen", "1 stuk (ca. 800 gram)")) == {"score": 95, "kind": "size"}
+assert score(("AH Andijvie fijngesneden grootverpakking", "AH", "500 g"), ("Picnic andijvie fijngesneden", "500 gram"))["score"] == 95
+assert score(("AH Rucola slamelange", "AH", "75 g"), ("Picnic rucola melange", "75 gram"))["score"] == 95
+assert score(("Bolletje Echte beschuit", "Bolletje", "13 stuks"), ("Bolletje beschuit", "13 stuks"))["score"] == 95
+assert score(("AH Volkoren brood", "AH", "800 g"), ("Picnic brood wit", "800 gram"))["score"] < s.MATCH_MIN_SCORE
+assert s.parse_size("1 stuk (ca. 800 gram)") == (800, "g") and s.parse_size("los per kilo") == (1000, "g")
+assert s.search_queries("AH Andijvie fijngesneden grootverpakking", "AH") == ["andijvie fijngesneden", "fijngesneden", "andijvie"]
+assert s.search_queries("Bolletje Echte beschuit", "Bolletje") == ["bolletje beschuit", "beschuit"]
+assert s.search_queries("AH Biologisch Pompoen", "AH Biologisch") == ["bio pompoen", "pompoen"]
 assert s.search_query("AH Halfvolle melk 1 L", "AH") == "halfvolle melk"
 best = s.best_match({"title": "AH Halfvolle melk", "brand": "AH", "unit_size": "1 l"},
                     [{"article_id": "a", "title": "Picnic volle melk", "unit": "1 liter"},

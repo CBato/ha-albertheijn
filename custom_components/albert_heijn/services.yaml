@@ -167,6 +167,13 @@ sync_history:
           min: 1
           max: 2000
           mode: box
+    retry_not_found:
+      name: Look again for products not found
+      description: Also search other stores again for products not found there this week (e.g. after matching improved).
+      required: false
+      default: false
+      selector:
+        boolean:
 
 fill_list:
   name: Fill the shopping list

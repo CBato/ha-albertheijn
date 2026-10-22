@@ -123,6 +123,7 @@ SYNC_HISTORY_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_REFRESH_CATALOG, default=False): cv.boolean,
         vol.Optional("max_products"): vol.All(vol.Coerce(int), vol.Range(min=1, max=2000)),
+        vol.Optional("retry_not_found", default=False): cv.boolean,
     }
 )
 
@@ -347,7 +348,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     async def handle_sync_history(call: ServiceCall) -> ServiceResponse:
         """Fetch new delivered orders now (normally once a day)."""
         coordinator = _get_coordinator(hass)
-        changed = await coordinator.async_sync_history(call.data[ATTR_REFRESH_CATALOG], max_products=call.data.get("max_products"))
+        changed = await coordinator.async_sync_history(call.data[ATTR_REFRESH_CATALOG], max_products=call.data.get("max_products"),
+                                                      retry_not_found=call.data["retry_not_found"])
         history = coordinator.history
         return {
             "changed": changed,

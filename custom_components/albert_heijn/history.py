@@ -28,6 +28,7 @@ from .suggest import (
     eur,
     parse_promo,
     parse_size,
+    search_queries,
     search_query,
     unit_price,
     week_start,
@@ -192,6 +193,7 @@ class OrderHistory:
         self._lock = asyncio.Lock()  # one sync at a time
         self._list_lock = asyncio.Lock()  # one change of the shopping list at a time (fill / cleanup)
         self._max: int | None = None  # products per heavy step in the running sync (None = the default)
+        self._retry = False  # look again for products not found at other stores this week
         self.meta: dict[str, str] = {}
         self.summary: dict[str, Any] = {}
         self._frequent: list[dict[str, Any]] = []
@@ -416,7 +418,7 @@ class OrderHistory:
 
     async def async_sync(
         self, open_orders: list[Fulfillment], refresh_catalog: bool = False, refresh_prices: bool = False, heavy: bool = True,
-        max_products: int | None = None,
+        max_products: int | None = None, retry_not_found: bool = False,
     ) -> bool:
         """Fetch new delivered orders, receipts and bonus; with heavy also the catalog, prices, product details, EAN
         codes and other stores (each when due, a limited number per run). Returns True if anything changed.
@@ -426,6 +428,7 @@ class OrderHistory:
         (details, EAN, other stores) in this run; default DETAILS_MAX / GTIN_MAX / STORE_MAX.
         """
         self._max = max_products
+        self._retry = retry_not_found
         if self._lock.locked():
             return False
         async with self._lock:
@@ -700,21 +703,29 @@ class OrderHistory:
         if m["confirmed"]:
             if found := await job(compare.picnic_article, client, m["confirmed"]):
                 found.update(match="confirmed", score=100)
-        if not found and product.get("gtin"):
-            hit = await job(compare.picnic_lookup, client, product["gtin"])
+        for gtin in product.get("gtins") or ([product["gtin"]] if product.get("gtin") else []):
+            if found:
+                break
+            hit = await job(compare.picnic_lookup, client, gtin)
             if hit and hit.get("article_id") not in m["rejected"]:
                 found = {**hit, "match": "ean", "score": 100}
-        if not found and product.get("title") and (query := search_query(product["title"], product.get("brand"))):
-            await asyncio.sleep(STORE_PAUSE)
-            candidates = await job(compare.picnic_search, client, query)
-            if best := best_match(product, candidates, m["rejected"]):
+        if not found and product.get("title"):
+            # from precise to broad; stop at the first search with a good match, else the best over all searches
+            candidates: dict[str, dict[str, Any]] = {}
+            for query in search_queries(product["title"], product.get("brand")):
+                await asyncio.sleep(STORE_PAUSE)
+                for c in await job(compare.picnic_search, client, query):
+                    candidates.setdefault(c["article_id"], c)
+                if best_match(product, list(candidates.values()), m["rejected"]):
+                    break
+            if best := best_match(product, list(candidates.values()), m["rejected"]):
                 found = {k: best.get(k) for k in ("article_id", "title", "price", "unit", "image_url")}
                 found.update(match=best["kind"], score=best["score"])
         await self._run(db.save_store_price, compare.PICNIC, pid, today, found)
 
     async def _fetch_picnic(self, today: str, now: str) -> str | None:
         """Weekly: every bought product at Picnic (barcode, else name and size). Returns an error text, or None."""
-        due = await self._run(db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), self._max or STORE_MAX)
+        due = await self._run(db.store_due, compare.PICNIC, (date.today() - timedelta(days=STORE_EVERY_DAYS - 1)).isoformat(), self._max or STORE_MAX, self._retry)
         if not due:
             return None
         client, err = await self._picnic()
