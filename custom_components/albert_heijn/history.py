@@ -251,6 +251,13 @@ class OrderHistory:
             await self._run(db.recheck_confirmed, compare.PICNIC, ("auto",))
             self.meta["matching_v4"] = _now()
             await self._run(db.set_meta, {"matching_v4": self.meta["matching_v4"]})
+        if not self.meta.get("matching_v5"):
+            # once (0.29.2): English names, pils, brand-only searches; automatic confirmations shown as such
+            await self._run(db.rescore_name_matches, compare.PICNIC)
+            await self._run(db.recheck_confirmed, compare.PICNIC, ("auto",))
+            await self._run(db.mark_auto_matches, compare.PICNIC)
+            self.meta["matching_v5"] = _now()
+            await self._run(db.set_meta, {"matching_v5": self.meta["matching_v5"]})
         if n := await self._run(db.confirm_high_scores, compare.PICNIC, AUTO_CONFIRM_SCORE, _now()):
             _LOGGER.info("Albert Heijn: %d Picnic matches with score %d+ confirmed", n, AUTO_CONFIRM_SCORE)
 
@@ -744,11 +751,11 @@ class OrderHistory:
         found, guess = None, None
         if m["confirmed"]:
             if found := await job(compare.picnic_article, client, m["confirmed"]):
-                found.update(match="confirmed", score=100)
+                found.update(match="auto" if m.get("auto") else "confirmed", score=100)
         # matched before on barcode or same name and size: only the new price of that article (search again only when
         # it is gone). Another size or a similar product: search again, a better match may exist (the same size).
         last = product.get("last_article")
-        if not found and last and last not in m["rejected"] and product.get("last_match") in ("ean", "same"):
+        if not found and last and last not in m["rejected"] and product.get("last_match") in ("ean", "same", "auto"):
             if found := await job(compare.picnic_article, client, last):
                 found.update(match=product.get("last_match") or "ean", score=product.get("last_score") or 100)
         for gtin in product.get("gtins") or ([product["gtin"]] if product.get("gtin") else []):
@@ -760,7 +767,7 @@ class OrderHistory:
         if not found and product.get("title"):
             # from precise to broad; stop at the first search with a good match, else the best over all searches
             candidates: dict[str, dict[str, Any]] = {}
-            for query in search_queries(product["title"], product.get("brand"))[:2]:
+            for query in search_queries(product["title"], product.get("brand"))[:3]:
                 await asyncio.sleep(STORE_PAUSE)
                 for c in await job(compare.picnic_search, client, query):
                     candidates.setdefault(c["article_id"], c)
@@ -774,7 +781,7 @@ class OrderHistory:
                 guess = {k: best.get(k) for k in ("article_id", "title", "price", "unit", "image_url", "score", "kind")}
         if found and found.get("match") == "same" and found["score"] >= AUTO_CONFIRM_SCORE:
             await self._run(db.add_confirmed_match, compare.PICNIC, pid, found["article_id"], _now(), "auto")
-            found.update(match="confirmed", score=100)
+            found.update(match="auto", score=100)
         await self._run(db.save_store_price, compare.PICNIC, pid, today, found, guess)
 
     async def _fetch_picnic(self, today: str, now: str) -> str | None:
@@ -864,7 +871,7 @@ class OrderHistory:
                     row["picnic_equiv"] = round(unit_price(p["price"], theirs) * mine[0] / (1 if mine[1] == "st" else 1000), 2)
                     row["picnic_per_unit"], row["ah_per_unit"] = unit_price(p["price"], theirs), unit_price(a.get("price"), mine)
                 if a.get("price") is not None:
-                    exact = p.get("match") in ("ean", "confirmed")
+                    exact = p.get("match") in ("ean", "confirmed", "auto")
                     for bucket in ((sure, likely) if exact else (likely,)):
                         bucket["n"] += 1
                         bucket["ah"] += a["price"] * qty

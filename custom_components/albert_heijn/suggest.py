@@ -258,7 +258,10 @@ def _plain(text: str) -> str:
     """Lowercase, no accents, only letters, digits and spaces ("Crème fraîche" -> "creme fraiche")."""
     t = unicodedata.normalize("NFKD", text or "")
     t = "".join(c for c in t if not unicodedata.combining(c)).lower()
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", t).split())
+    t = " ".join(re.sub(r"[^a-z0-9]+", " ", t).split())
+    for phrase, word in _PHRASES.items():
+        t = re.sub(rf"\b{phrase}\b", word, t)
+    return t
 
 
 def _stem(word: str) -> str:
@@ -323,7 +326,7 @@ _WEAK = {"echte", "echt", "original", "originele", "origineel", "classic", "klas
          "verse", "vers", "huismerk", "nieuw", "new", "luxe", "gekoeld", "pitloze", "pitloos", "romige", "romig",
          "thee", "tea", "infusion", "infusie", "vruchtensap", "patent", "kaas", "vet", "classico", "chips",
          "crackers", "cracker", "koek", "koekjes", "ijsje", "knackebrod", "schuim", "smaak", "sugar", "iets", "kleintje",
-         "originals"}
+         "originals", "premium", "gebroken", "chocoladereep", "reep"}
 # parts of a compound word that change the product ("half" + "volle" is not "volle")
 _QUALIFIERS = {"half", "mager", "extra", "super", "light", "licht", "dubbel", "volkoren", "wit", "witte", "bruin", "bruine",
                "zoet", "zuur", "zout", "ongezouten", "pittig", "mild", "jong", "oud", "belegen", "zero", "suikervrij", "vol"}
@@ -335,7 +338,14 @@ _SYNONYMS = {"biologisch": "bio", "biologische": "bio", "organic": "bio", "eko":
              "hagel": "hagelslag", "chocoladehagel": "hagelslag", "chocoladehagelslag": "hagelslag",
              "rode": "rood", "groene": "groen", "gele": "geel", "witte": "wit", "zwarte": "zwart", "oranje": "oranje",
              "zero": "0%", "frites": "friet", "frieten": "friet", "patat": "friet", "color": "kleur", "colour": "kleur",
-             "fijngesnipperd": "gesneden", "gesnipperd": "gesneden", "roma": "pruim"}
+             "fijngesnipperd": "gesneden", "gesnipperd": "gesneden", "roma": "pruim",
+             "pilsener": "pils", "pilsner": "pils", "hazelnoten": "hazelnoot", "hazelnut": "hazelnoot", "hazelnuts": "hazelnoot",
+             # English names at the other store (or at AH): the Dutch word
+             "milk": "melk", "apple": "appel", "apples": "appel", "strawberry": "aardbei", "raspberry": "framboos",
+             "lemon": "citroen", "coconut": "kokos", "peach": "perzik", "banana": "banaan", "cherry": "kers",
+             "chocolate": "chocolade", "vanilla": "vanille", "caramel": "karamel"}
+# the same thing in more words ("rice cakes" = "rijstwafels")
+_PHRASES = {"rice cakes": "rijstwafel", "rice cake": "rijstwafel"}
 # numbers that make a different product: fat or sugar ("48+" vs "30+", "0%" vs "5%")
 _GRADE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(%|\+)")
 # store brands: different at every store, so the brand doesn't have to match (the product does)
@@ -414,7 +424,8 @@ def search_queries(title: str, brand: str | None = None) -> list[str]:
         # a brand: brand + its most telling word; a store brand: the first word, usually the product itself
         # ("appelmoes 0% suiker toegevoegd" -> "appelmoes", not "toegevoegd")
         out.append(" ".join(brand_words + [max(rest, key=len)]) if brand_words else rest[0])
-        out.append(rest[0])
+    if brand_words:
+        out.append(" ".join(brand_words))  # the brand alone: the score picks the right one from its products
     return [q for i, q in enumerate(out) if q and q not in out[:i]]
 
 
@@ -474,7 +485,7 @@ def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str,
             other_brand = True
     if not mine:
         # nothing telling besides the brand ("Pringles Original"): the brand and the size decide
-        score = 85 if branded and brand_ok and theirs <= {"naturel", "0%"} else 0
+        score = (100 if not theirs else 85) if branded and brand_ok and theirs <= {"naturel", "0%"} else 0
         hits = extra = 0
     else:
         if compact(product.get("title") or "").replace(compact(product.get("brand") or ""), "") == \
@@ -487,7 +498,8 @@ def match_score(product: dict[str, Any], candidate: dict[str, Any]) -> dict[str,
             if "naturel" in mine and "naturel" not in theirs and all(found(w, mine) for w in theirs):
                 hits += 1
             # a grade only they mention ("0%" Optimel) is no difference; a conflicting one is handled below
-            extra = sum(not found(w, mine) for w in theirs if not _GRADE_RE.fullmatch(w))
+            extra = sum(not found(w, mine) for w in theirs
+                        if not _GRADE_RE.fullmatch(w) and not (branded and w == "bio"))
         # your words found there, minus every word they have extra ("rode kool" vs "rode kool met appel"), and more when a
         # word of yours is swapped for another one: another flavour ("coconut chocolate" vs "double chocolate")
         missing = len(mine) - hits

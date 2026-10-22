@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS store_prices (
     original_price REAL,            -- price without the offer, if it has one
     unit TEXT,
     image_url TEXT,
-    guess TEXT,                     -- not found: the best candidate below the match score (JSON), to confirm by hand
+    guess TEXT,
+    -- match: ean, confirmed (by you), auto (confirmed by the score), same, size, similar                     -- not found: the best candidate below the match score (JSON), to confirm by hand
     match TEXT,                     -- how it was matched: ean, confirmed, same (name + size), size (other size), similar
     score INTEGER,                  -- 100 = same barcode or confirmed; name matches 60-95
     PRIMARY KEY (store, product_id, date)
@@ -932,9 +933,9 @@ def store_matches(path: str, store: str) -> dict[int, dict[str, Any]]:
     out: dict[int, dict[str, Any]] = {}
     with closing(_connect(path)) as con:
         for r in con.execute("SELECT product_id, article_id, status FROM store_matches WHERE store = ?", (store,)):
-            m = out.setdefault(r["product_id"], {"confirmed": None, "rejected": set()})
+            m = out.setdefault(r["product_id"], {"confirmed": None, "auto": False, "rejected": set()})
             if r["status"] in ("confirmed", "auto"):
-                m["confirmed"] = r["article_id"]
+                m["confirmed"], m["auto"] = r["article_id"], r["status"] == "auto"
             else:
                 m["rejected"].add(r["article_id"])
     return out
@@ -989,7 +990,7 @@ def confirm_high_scores(path: str, store: str, min_score: int, now: str) -> int:
         for r in rows:
             con.execute("INSERT OR IGNORE INTO store_matches(store, product_id, article_id, status, updated) VALUES(?, ?, ?, 'auto', ?)",
                         (store, r["product_id"], r["article_id"], now))
-            con.execute("UPDATE store_prices SET match = 'confirmed', score = 100 WHERE store = ? AND product_id = ? AND date = ?",
+            con.execute("UPDATE store_prices SET match = 'auto', score = 100 WHERE store = ? AND product_id = ? AND date = ?",
                         (store, r["product_id"], r["date"]))
         return len(rows)
 
@@ -1101,3 +1102,13 @@ def recheck_confirmed(path: str, store: str, statuses: tuple[str, ...] = ("auto"
                             (new["kind"], new["score"], store, r["product_id"], r["date"]))
             out += 1
     return out
+
+
+def mark_auto_matches(path: str, store: str) -> int:
+    """Show automatic confirmations as such: the latest check of products confirmed by the score gets match 'auto'."""
+    with closing(_connect(path)) as con, con:
+        return con.execute(
+            """UPDATE store_prices SET match = 'auto'
+               WHERE store = ? AND match = 'confirmed'
+                 AND EXISTS (SELECT 1 FROM store_matches m WHERE m.store = store_prices.store AND m.product_id = store_prices.product_id
+                             AND m.article_id = store_prices.article_id AND m.status = 'auto')""", (store,)).rowcount

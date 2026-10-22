@@ -57,6 +57,7 @@ for mine, theirs in [
     (("Dodoni Griekse yoghurt 0% vet", "Dodoni", "500 g"), ("Dodoni Griekse yoghurt 5%", "500 gram")),
     (("Holie's Chewy bar coconut chocolate", "Holie's", "105 g"), ("Holie's chewy bar double chocolate", "105 gram")),
     (("AH Smeerkaas naturel 15+", "AH", "200 g"), ("Echte Smeerkaas 48+ naturel", "100 gram")),
+    (("Holie's Crunchy muesli protein apple crumble", "Holie's", "400 g"), ("Holie's Crunchy muesli 4 nuts", "400 gram")),
 ]:
     assert score(mine, theirs)["score"] < s.MATCH_MIN_SCORE, (mine[0], score(mine, theirs))
 # should match, and these are so clearly the same that they are confirmed automatically (95)
@@ -83,12 +84,16 @@ for mine, theirs in [
     (("AH Roma tomaten", "AH", "750 g"), ("Pruimtomaten", "750 gram")),
     (("AH Gesneden rode uien", "AH", "150 g"), ("Picnic rode uien fijngesnipperd", "150 gram")),
     (("AH Fijngesneden ijsbergsla", "AH", "100 g"), ("Picnic ijsbergsla fijn", "100 gram")),
+    (("Heineken Premium pilsener 6-pack", "Heineken", "6 x 0,33 l"), ("Heineken pils", "6 x 330 ml")),  # pilsener = pils
+    (("Tuc Original", "Tuc", "100 g"), ("Tuc Crackers Original", "100 gram")),  # nothing left either side: brand + size
 ]:
     assert score(mine, theirs) == {"score": 95, "kind": "same"}, (mine[0], score(mine, theirs))
 # likely (shown, not confirmed automatically): a brand with a shorter name there, "Original" = "Naturel"
 for mine, theirs in [
     (("Actimel Drinkyoghurt aardbei", "Actimel", "8 x 100 ml"), ("Actimel aardbei", "8 x 100 ml")),
     (("Pringles Original", "Pringles", "165 g"), ("Pringles Naturel", "165 gram")),
+    (("Milka Chocoladereep gebroken hazelnoten", "Milka", "90 g"), ("Milka milk hazelnut", "90 gram")),  # English names
+    (("Organix Apple rice cake clouds 12m+", "Organix", "40 g"), ("Organix bio appel rijstwafeltjes", "40 gram")),
 ]:
     assert 60 <= score(mine, theirs)["score"] < 95, (mine[0], score(mine, theirs))
 # your store brand against another maker's product ("Bar le Duc ..."): their name is no extra word, but comparable at
@@ -101,8 +106,12 @@ for mine, theirs in [
     assert score(mine, theirs) == {"score": 85, "kind": "same"}, (mine[0], score(mine, theirs))
 # grams vs pieces stays "similar" without the heavy weight-vs-volume penalty
 assert score(("Unox Knaks", "Unox", "400 g"), ("Unox knaks", "11 stuks")) == {"score": 90, "kind": "similar"}
-assert s.search_queries("Bolletje Echte beschuit", "Bolletje") == ["bolletje beschuit", "beschuit"]
+assert s.search_queries("Bolletje Echte beschuit", "Bolletje") == ["bolletje beschuit", "bolletje"]
 assert s.search_queries("AH Biologisch Pompoen", "AH Biologisch") == ["bio pompoen", "pompoen"]
+# a brand: also the brand alone
+assert s.search_queries("Organix Apple rice cake clouds 12m+", "Organix") == ["organix appel rijstwafel clouds", "organix rijstwafel", "organix"]
+# store brand vs bio there: still a difference (not confirmed automatically)
+assert score(("AH Volle melk", "AH", "1 l"), ("Picnic bio volle melk", "1 liter"))["score"] < 95
 assert s.search_query("AH Halfvolle melk 1 L", "AH") == "halfvolle melk"
 best = s.best_match({"title": "AH Halfvolle melk", "brand": "AH", "unit_size": "1 l"},
                     [{"article_id": "a", "title": "Picnic volle melk", "unit": "1 liter"},

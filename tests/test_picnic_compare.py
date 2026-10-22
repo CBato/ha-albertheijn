@@ -201,6 +201,13 @@ async def main():
     assert (await h._run(db.store_matches, "picnic")).get(2, {}).get("confirmed") is None
     assert (await h._run(db.store_prices_for, [2]))[2]["picnic"]["match"] == "size"
 
+    # an automatic confirmation shows as 'auto', yours as 'confirmed'
+    await h._run(db.add_confirmed_match, "picnic", 1, "s1", now)
+    con = sqlite3.connect(Hass.config.path("albert_heijn.db"))
+    con.execute("UPDATE store_prices SET match = 'confirmed' WHERE store = 'picnic' AND product_id = 1"); con.commit(); con.close()
+    assert await h._run(db.mark_auto_matches, "picnic") >= 1
+    assert (await h._run(db.store_prices_for, [1]))[1]["picnic"]["match"] == "auto"
+
     # without the Picnic integration: skipped, no error
     Hass.config_entries = ConfigEntries()
     n = FakePicnic.calls
