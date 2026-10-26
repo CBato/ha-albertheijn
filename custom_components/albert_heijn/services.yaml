@@ -325,10 +325,10 @@ cleanup_suggestions:
           max: 365
 
 compare_list:
-  name: Compare the list with other stores
+  name: Compare this week's groceries with other stores
   description: >-
-    The products on the AH shopping list with the AH price now and the price at Picnic (matched on EAN, needs the
-    Picnic integration of Home Assistant). Totals only over products both stores sell.
+    The products on the AH shopping list plus those already in the next order, with the AH price now and the price
+    at Picnic and Jumbo. Totals per store only over products that store sells.
   fields:
     items:
       name: Products

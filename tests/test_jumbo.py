@@ -169,6 +169,13 @@ async def main():
     # the list as the app shows it: no request to AH at all
     c = await h.async_compare_list([{"product_id": 2, "quantity": 3}])
     assert c["source"] == "app" and c["items"][0]["stores"]["jumbo"]["price"] == 0.79, c
+    # this week's groceries: the list plus what is already in the order; on both = once, the larger quantity
+    c = await h.async_compare_list([{"product_id": 2, "quantity": 3}, {"product_id": 1, "quantity": 1}],
+                                   [{"product_id": 1, "quantity": 2}, {"product_id": 3, "quantity": 1}])
+    rows = {r["product_id"]: r for r in c["items"]}
+    assert set(rows) == {1, 2, 3} and c["on_list"] == 2 and c["in_order"] == 2, c
+    assert rows[1]["quantity"] == 2 and rows[1]["in_order"] == 2 and rows[1]["on_list"] == 1, rows[1]
+    assert rows[3]["in_order"] == 1 and rows[3]["on_list"] == 0 and rows[2]["in_order"] == 0
     FakeApi.get_shopping_list = real_list
 
     # search and confirm by hand at Jumbo

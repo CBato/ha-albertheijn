@@ -950,13 +950,14 @@ class OrderHistory:
 
     async def async_compare_list(self, items: list[dict[str, Any]] | None = None,
                                  order_items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-        """What is on the AH shopping list now, with the AH price and the price at the other stores. Totals per store
-        only over products that store sells, so they compare like with like: "sure" (same barcode or a confirmed
-        match) and "likely" (plus name matches; other sizes recalculated to yours).
+        """This week's groceries - what is on the AH shopping list plus what is already in the next order (order_items) -
+        with the AH price and the price at the other stores. A product on both counts once, with the larger quantity
+        (in_order / on_list say where it is). Totals per store only over products that store sells, so they compare
+        like with like: "sure" (same barcode or a confirmed match) and "likely" (plus name matches; other sizes
+        recalculated to yours).
 
-        items: the products to compare (product_id, quantity), e.g. the list as the app shows it; default the AH
-        shopping list. While an order is open for changes AH refuses the shopping list (412 "Server in order mode");
-        then the products of that order (order_items) are compared."""
+        items: the list (product_id, quantity), e.g. as the app shows it; default the AH shopping list. While an order
+        is open for changes AH refuses the shopping list (412 "Server in order mode"); then only the order counts."""
         source = "app" if items is not None else "list"
         if items is None:
             try:
@@ -965,7 +966,18 @@ class OrderHistory:
                 if err.status != 412 or order_items is None:
                     raise
                 items, source = order_items, "order"
-        items = [i for i in items if i.get("product_id") and not i.get("checked")]
+        merged: dict[int, dict[str, Any]] = {}
+        if source != "order":
+            for i in items:
+                if i.get("product_id") and not i.get("checked"):
+                    merged[int(i["product_id"])] = {**i, "on_list": int(i.get("quantity") or 1)}
+        for o in order_items or []:
+            if not o.get("product_id"):
+                continue
+            pid, n = int(o["product_id"]), int(o.get("quantity") or 1)
+            row = merged.setdefault(pid, {**o, "quantity": 0})
+            row.update(quantity=max(int(row.get("quantity") or 0), n), in_order=n)
+        items = list(merged.values())
         ids = [int(i["product_id"]) for i in items]
         ah = await self._run(db.ah_prices_now, ids)
         other = await self._run(db.store_prices_for, ids)
@@ -977,7 +989,8 @@ class OrderHistory:
             pid, qty = int(i["product_id"]), int(i.get("quantity") or 1)
             a = ah.get(pid) or {}
             row = {"product_id": pid, "title": a.get("title") or i.get("title"), "quantity": qty, "ah": a.get("price"), "ah_normal": a.get("normal"),
-                   "ah_bonus": a.get("bonus"), "ah_size": a.get("unit_size"), "stores": {}}
+                   "ah_bonus": a.get("bonus"), "ah_size": a.get("unit_size"), "stores": {},
+                   "in_order": i.get("in_order", 0), "on_list": i.get("on_list", 0)}
             mine = parse_size(a.get("unit_size") or a.get("title"))
             for store in stores:
                 p = (other.get(pid) or {}).get(store)
@@ -1017,7 +1030,8 @@ class OrderHistory:
         by_store = {s: {k: rnd(b) for k, b in t.items()} for s, t in totals.items()}
         old = lambda b: {"n": b["n"], "ah": b["ah"], compare.PICNIC: b["store"]}  # noqa: E731
         pc_tot = by_store.get(compare.PICNIC) or {"sure": {"n": 0, "ah": 0, "store": 0}, "likely": {"n": 0, "ah": 0, "store": 0}}
-        return {"items": rows, "on_list": len(items), "source": source, "stores": [{"id": s, "name": compare.STORE_NAMES[s]} for s in stores],
+        return {"items": rows, "on_list": sum(1 for i in items if i.get("on_list")), "in_order": sum(1 for i in items if i.get("in_order")),
+                "source": source, "stores": [{"id": s, "name": compare.STORE_NAMES[s]} for s in stores],
                 "by_store": by_store, "compared": pc_tot["sure"]["n"], "totals": old(pc_tot["sure"]), "likely": old(pc_tot["likely"]),
                 "picnic_connected": compare.picnic_credentials(self._hass) is not None}
 
